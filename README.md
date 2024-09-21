@@ -6,3 +6,4 @@ Notebooks to be used as a starting point for supernova similarity searches and t
 
 ![laiss](./assets/LAISS_plot.png)
 
+Evan's Edition
