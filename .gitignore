@@ -17,3 +17,5 @@ data/dataset_bank_orig_5472objs_pcaTrue_hostTrue_annoy_index_feat_arr_scaled.npy
 data/dataset_bank_orig_5472objs_pcaTrue_hostTrue_annoy_index_feat_arr_scaled_pca.npy
 code/__pycache__/mod_laiss_functions.cpython-39.pyc
 code/__pycache__/mod_helper_functions.cpython-39.pyc
+data/ZTFBTS.txt
+data/transient_feature_lib.csv

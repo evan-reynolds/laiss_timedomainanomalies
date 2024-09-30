@@ -483,12 +483,12 @@ def extract_lc_and_host_features(
     ztf_id_ref = ztf_id_ref  #'ZTF20aalxlis' #'ZTF21abmspzt'
     df_path = "../timeseries"
 
-    # try:
-    ref_info = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztf_id_ref)
-    df_ref = ref_info.timeseries.to_pandas()
-    # except:
-    #    print("antares_client can't find this object. Skip! Continue...")
-    #    return
+    try:
+        ref_info = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztf_id_ref)
+        df_ref = ref_info.timeseries.to_pandas()
+    except:
+        print("antares_client can't find this object. Skip! Continue...")
+        return
 
     df_ref_g = df_ref[(df_ref.ant_passband == "g") & (~df_ref.ant_mag.isna())]
     df_ref_r = df_ref[(df_ref.ant_passband == "R") & (~df_ref.ant_mag.isna())]

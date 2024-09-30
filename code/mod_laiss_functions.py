@@ -162,6 +162,7 @@ def mod_LAISS(
 
     ############# LOOP HERE #############
     host = False
+    n_flag = False
     for i, l_or_ztfid_ref in enumerate(l_or_ztfid_refs):
         if i == 1:
             host = True
@@ -297,7 +298,9 @@ def mod_LAISS(
                 needs_reextraction_for_AD = True
                 l_or_ztfid_ref_in_dataset_bank = True
                 print(f"{l_or_ztfid_ref} is in dataset_bank")
-                n = n + 1
+                if not n_flag:
+                    n = n + 1
+                    n_flag = True
 
             except:
                 print(
@@ -354,7 +357,7 @@ def mod_LAISS(
                     )  # if this drops all rows, that means something is nan from a 0 or nan entry (check data file)
 
                     try:
-                        print(lc_and_hosts_df.columns.values)
+                        # print(lc_and_hosts_df.columns.values)
                         lc_and_hosts_df_120d = lc_and_hosts_df[lc_and_host_features]
                     except:
                         print(f"{ztfid_ref} has some NaN LC features. Skip!")
@@ -524,10 +527,10 @@ def mod_LAISS(
     # Print the nearest neighbors
     print("\t\t\t\t\t   ZTFID IAU_NAME SPEC Z")
     print(
-        f"LC REF. : https://alerce.online/object/{LC_ztfid_ref} {LC_tns_name} {LC_tns_cls} {LC_tns_z}"
+        f"LC REF: https://alerce.online/object/{LC_ztfid_ref} {LC_tns_name} {LC_tns_cls} {LC_tns_z}"
     )
     print(
-        f"HOST REF. : https://alerce.online/object/{HOST_ztfid_ref} {HOST_tns_name} {HOST_tns_cls} {HOST_tns_z}"
+        f"HOST REF: https://alerce.online/object/{HOST_ztfid_ref} {HOST_tns_name} {HOST_tns_cls} {HOST_tns_z}"
     )
 
     ann_num_l = []
@@ -536,7 +539,8 @@ def mod_LAISS(
     ):
         if l_or_ztfid_ref.startswith("ZTF"):
             if i == 0:
-                continue
+                # continue
+                pass
             print(f"ANN={i}: {al} {iau_name} {spec_cls}, {z}")
             ann_num_l.append(i)
         else:
@@ -701,7 +705,7 @@ def mod_LAISS(
                     fmt=markers[num],
                     c=c1,
                     alpha=alpha,
-                    label=f"ANN={num+1}: {ztfname}, d={int(dist)}\n{iau_name},\t{spec_cls},\tz={round(z, 3)}",
+                    label=f"ANN={num}: {ztfname}, d={int(dist)}\n{iau_name},\t{spec_cls},\tz={round(z, 3)}",
                 )
                 ax.errorbar(
                     x=df_g.ant_mjd - df_g.ant_mjd.iloc[mjd_idx_at_min_mag_g],
