@@ -346,9 +346,10 @@ def get_detections(photometry, band):
     return detections
 
 
-def plot_RFC_prob_vs_lc_ztfid(
+def mod_plot_RFC_prob_vs_lc_ztfid(
     clf,
     anom_ztfid,
+    host_ztf_id,
     anom_spec_cls,
     anom_spec_z,
     anom_thresh,
@@ -466,7 +467,10 @@ def plot_RFC_prob_vs_lc_ztfid(
         anom_spec_z = round(anom_spec_z, 3)
     else:
         anom_spec_z = anom_spec_z
-    ax1.set_title(rf"{anom_ztfid} ({anom_spec_cls}, $z$={anom_spec_z})", pad=25)
+    ax1.set_title(
+        rf"{anom_ztfid} ({anom_spec_cls}, $z$={anom_spec_z}) with host from {host_ztf_id}",
+        pad=25,
+    )
     plt.xlabel("MJD")
     ax1.set_ylabel("Magnitude")
     ax2.set_ylabel("Probability (%)")

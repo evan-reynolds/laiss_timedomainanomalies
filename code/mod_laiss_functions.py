@@ -1417,16 +1417,40 @@ def simple_LAISS(
                 LC_locus = antares_client.search.get_by_ztf_object_id(
                     ztf_object_id=ztf_id_temp
                 )
+            elif host:
+                HOST_lc_and_hosts_df = lc_and_hosts_df
+                HOST_lc_and_hosts_df_120d = lc_and_hosts_df_120d
 
-        # TODO: Modify to run with lightcurve and host from separate objects. Currently only running with LC.
-        plot_RFC_prob_vs_lc_ztfid(
+        # Create combined dataframe for anomaly detection
+        LC_HOST_COMBINED_lc_and_hosts_df = LC_lc_and_hosts_df
+        same_value_columns = HOST_lc_and_hosts_df[host_features].apply(
+            lambda x: x.nunique() == 1, axis=0
+        )
+        for column in host_features:
+            if same_value_columns[
+                column
+            ]:  # Check if all rows in the column are the same
+                LC_HOST_COMBINED_lc_and_hosts_df[column] = HOST_lc_and_hosts_df[
+                    column
+                ].iloc[
+                    0
+                ]  # Replace with the single host feat value
+            else:
+                print(f"ERROR: INCONSISTENT HOST FEATURE: {column}")
+
+        LC_HOST_COMBINED_lc_and_hosts_df_120d = LC_HOST_COMBINED_lc_and_hosts_df[
+            lc_and_host_features
+        ]
+
+        mod_plot_RFC_prob_vs_lc_ztfid(
             clf=clf,
             anom_ztfid=LC_ztfid_ref,
+            host_ztf_id=HOST_ztfid_ref,
             anom_spec_cls=LC_tns_cls,
             anom_spec_z=LC_tns_z,
             anom_thresh=50,
-            lc_and_hosts_df=LC_lc_and_hosts_df,
-            lc_and_hosts_df_120d=LC_lc_and_hosts_df_120d,
+            lc_and_hosts_df=LC_HOST_COMBINED_lc_and_hosts_df,
+            lc_and_hosts_df_120d=LC_HOST_COMBINED_lc_and_hosts_df_120d,
             ref_info=LC_locus,
             savefig=False,
             figure_path=figure_path,
