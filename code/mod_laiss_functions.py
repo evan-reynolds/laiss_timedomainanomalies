@@ -972,6 +972,8 @@ def simple_LAISS(
     HOST_l_or_ztfid_ref,
     lc_features,
     host_features=[],
+    use_pca_for_nn=True,
+    search_k=1000,
     n=8,
     show_lightcurves_grid=False,
     run_AD_model=False,
@@ -1097,53 +1099,79 @@ def simple_LAISS(
     subset_temp_host_features = HOST_locus_feat_arr[-58:]
     locus_feat_arr = np.concatenate((subset_lc_features, subset_temp_host_features))
 
-    # 1. Scale locus_feat_arr using the same scaler (Standard Scaler)
-    scaler = preprocessing.StandardScaler()
-    trained_PCA_feat_arr = np.load(
-        f"../data/dataset_bank_orig_5472objs_pcaTrue_hostTrue_annoy_index_feat_arr.npy",
-        allow_pickle=True,
-    )
+    if use_pca_for_nn:
+        # 1. Scale locus_feat_arr using the same scaler (Standard Scaler)
+        scaler = preprocessing.StandardScaler()
+        trained_PCA_feat_arr = np.load(
+            f"../data/dataset_bank_orig_5472objs_pcaTrue_hostTrue_annoy_index_feat_arr.npy",
+            allow_pickle=True,
+        )
 
-    trained_PCA_feat_arr_scaled = scaler.fit_transform(
-        trained_PCA_feat_arr
-    )  # scaler needs to be fit first to the same data as trained
+        trained_PCA_feat_arr_scaled = scaler.fit_transform(
+            trained_PCA_feat_arr
+        )  # scaler needs to be fit first to the same data as trained
 
-    locus_feat_arr_scaled = scaler.transform(
-        [locus_feat_arr]
-    )  # scaler transform new data
+        locus_feat_arr_scaled = scaler.transform(
+            [locus_feat_arr]
+        )  # scaler transform new data
 
-    # 2. Transform the scaled locus_feat_arr using the same PCA model (60 PCs, RS=42)
-    n_components = 60
-    random_seed = 42
-    pca = PCA(n_components=n_components, random_state=random_seed)
-    trained_PCA_feat_arr_scaled_pca = pca.fit_transform(
-        trained_PCA_feat_arr_scaled
-    )  # pca needs to be fit first to the same data as trained
-    locus_feat_arr_pca = pca.transform(locus_feat_arr_scaled)  # pca transform  new data
+        # 2. Transform the scaled locus_feat_arr using the same PCA model (60 PCs, RS=42)
+        n_components = 60
+        random_seed = 42
+        pca = PCA(n_components=n_components, random_state=random_seed)
+        trained_PCA_feat_arr_scaled_pca = pca.fit_transform(
+            trained_PCA_feat_arr_scaled
+        )  # pca needs to be fit first to the same data as trained
+        locus_feat_arr_pca = pca.transform(
+            locus_feat_arr_scaled
+        )  # pca transform  new data
 
-    # Create or load the ANNOY index
-    # index_nm = "../dataset_bank_60pca_annoy_index" #5k, 1000 trees
-    # index_file = "../dataset_bank_60pca_annoy_index.ann" #5k, 1000 trees
-    index_nm = "../data/dataset_bank_orig_5472objs_pcaTrue_hostTrue_annoy_index"
-    index_file = index_nm + ".ann"
-    index_dim = n_components  # Dimension of the PCA index
+        # Create or load the ANNOY index
+        # index_nm = "../dataset_bank_60pca_annoy_index" #5k, 1000 trees
+        # index_file = "../dataset_bank_60pca_annoy_index.ann" #5k, 1000 trees
+        index_nm = "../data/dataset_bank_orig_5472objs_pcaTrue_hostTrue_annoy_index"
+        index_file = index_nm + ".ann"
+        index_dim = n_components  # Dimension of the PCA index
 
-    # 3. Use the ANNOY index to find nearest neighbors
-    print("Loading previously saved ANNOY LC+HOST PCA=60 index")
-    print(index_file)
+        # 3. Use the ANNOY index to find nearest neighbors
+        print("Loading previously saved ANNOY LC+HOST PCA=60 index")
+        print(index_file)
 
-    index = annoy.AnnoyIndex(index_dim, metric="manhattan")
-    index.load(index_file)
-    idx_arr = np.load(f"{index_nm}_idx_arr.npy", allow_pickle=True)
+        index = annoy.AnnoyIndex(index_dim, metric="manhattan")
+        index.load(index_file)
+        idx_arr = np.load(f"{index_nm}_idx_arr.npy", allow_pickle=True)
 
-    ann_start_time = time.time()
-    ann_indexes, ann_dists = index.get_nns_by_vector(
-        locus_feat_arr_pca[0], n=n, include_distances=True
-    )
-    ann_alerce_links = [
-        f"https://alerce.online/object/{idx_arr[i]}" for i in ann_indexes
-    ]
-    ann_end_time = time.time()
+        ann_start_time = time.time()
+        ann_indexes, ann_dists = index.get_nns_by_vector(
+            locus_feat_arr_pca[0], n=n, search_k=search_k, include_distances=True
+        )
+        ann_alerce_links = [
+            f"https://alerce.online/object/{idx_arr[i]}" for i in ann_indexes
+        ]
+        ann_end_time = time.time()
+    else:
+        # Create or load the ANNOY index
+        index_nm = "../data/loci_df_271688objects_cut_stars_and_gal_plane_pcaFalse_hostFalse_annoy_index"
+        index_file = index_nm + ".ann"
+        index_dim = 62
+
+        # 3. Use the ANNOY index to find nearest neighbors
+        print("Loading previously saved ANNOY LC+HOST index without PCA")
+        print(index_file)
+
+        index = annoy.AnnoyIndex(index_dim, metric="manhattan")
+        index.load(index_file)
+        idx_arr = np.load(f"{index_nm}_idx_arr.npy", allow_pickle=True)
+
+        ann_start_time = time.time()
+        ann_indexes, ann_dists = index.get_nns_by_vector(
+            locus_feat_arr[0], n=n, search_k=search_k, include_distances=True
+        )
+        print(ann_indexes)
+        ann_alerce_links = [
+            f"https://alerce.online/object/{idx_arr[i]}" for i in ann_indexes
+        ]
+        ann_end_time = time.time()
 
     # 4. Get TNS, spec. class of ANNs
     tns_ann_names, tns_ann_classes, tns_ann_zs = [], [], []

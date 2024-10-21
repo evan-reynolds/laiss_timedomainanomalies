@@ -31,6 +31,11 @@ warnings.filterwarnings("ignore")
 with open("data/host_features.txt") as host_f:
     host_features = [line.strip() for line in host_f.readlines()]
 
+with open("../data/lc_features.txt") as lc_f:
+    lc_features = [line.strip() for line in lc_f.readlines()]
+
+lc_and_host_features = host_features + lc_features
+
 transient_df = pd.read_csv("data/ZTFBTS.txt")
 
 storage_df = pd.DataFrame()
