@@ -1156,7 +1156,7 @@ def simple_LAISS(
         index_dim = 62
 
         # 3. Use the ANNOY index to find nearest neighbors
-        print("Loading previously saved ANNOY LC+HOST index without PCA")
+        print("Loading previously saved ANNOY LC+HOST index without PCA:")
         print(index_file)
 
         index = annoy.AnnoyIndex(index_dim, metric="manhattan")
@@ -1165,7 +1165,7 @@ def simple_LAISS(
 
         ann_start_time = time.time()
         ann_indexes, ann_dists = index.get_nns_by_vector(
-            locus_feat_arr[0], n=n, search_k=search_k, include_distances=True
+            locus_feat_arr[:62], n=n, search_k=search_k, include_distances=True
         )
         print(ann_indexes)
         ann_alerce_links = [
@@ -1311,7 +1311,7 @@ def simple_LAISS(
                     fmt=markers[num],
                     c=c1,
                     alpha=alpha,
-                    label=f"ANN={num}: {ztfname}, d={int(dist)}\n{iau_name},\t{spec_cls},\tz={round(z, 3)}",
+                    label=f"ANN={num}: {ztfname}, d={round(dist, 2)}\n{iau_name},\t{spec_cls},\tz={round(z, 3)}",
                 )
                 ax.errorbar(
                     x=df_g.ant_mjd - df_g.ant_mjd.iloc[mjd_idx_at_min_mag_g],
