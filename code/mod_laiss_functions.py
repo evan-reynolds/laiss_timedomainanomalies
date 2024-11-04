@@ -94,6 +94,9 @@ def mod_build_indexed_sample(
         index.load(index_file)
         idx_arr = np.load(f"../data/{index_nm}_idx_arr.npy", allow_pickle=True)
 
+    # binary_index = f"../data/{index_nm}_idx_arr.npy"
+    return index_nm
+
 
 def mod_LAISS(
     LC_l_or_ztfid_ref,
@@ -1483,3 +1486,522 @@ def simple_LAISS(
             savefig=False,
             figure_path=figure_path,
         )
+
+
+def LAISS_primer(
+    LC_l_or_ztfid_ref,
+    HOST_l_or_ztfid_ref,
+    lc_features,
+    host_features=[],
+):
+    lc_and_host_features = lc_features + host_features
+    l_or_ztfid_refs = [LC_l_or_ztfid_ref, HOST_l_or_ztfid_ref]
+
+    host = False
+    n_flag = False
+    # Loop through lightcurve object and host object
+    for i, l_or_ztfid_ref in enumerate(l_or_ztfid_refs):
+        if i == 1:
+            host = True
+
+        l_or_ztfid_ref_in_dataset_bank = False
+        host_df_ztf_id_l, host_df_ra_l, host_df_dec_l = [], [], []
+
+        if l_or_ztfid_ref.startswith("ZTF"):
+            ztfid_ref = l_or_ztfid_ref
+
+            try:
+                dataset_bank_orig = pd.read_csv(
+                    "../data/dataset_bank_orig_5472objs.csv.gz",
+                    compression="gzip",
+                    index_col=0,
+                )
+                locus_feat_arr = dataset_bank_orig.loc[ztfid_ref]
+                if host:
+                    HOST_locus_feat_arr = locus_feat_arr[lc_and_host_features].values
+                else:
+                    LC_locus_feat_arr = locus_feat_arr[lc_and_host_features].values
+
+                l_or_ztfid_ref_in_dataset_bank = True
+                print(f"{l_or_ztfid_ref} is in dataset_bank")
+
+                if not n_flag:
+                    n = n + 1
+                    n_flag = True
+
+            except:
+                print(
+                    f"{l_or_ztfid_ref} is not in dataset_bank. Checking if made before..."
+                )
+                if os.path.exists(f"../timeseries/{l_or_ztfid_ref}_timeseries.csv"):
+                    print(f"{l_or_ztfid_ref} is already made. Continue!\n")
+
+                else:
+                    print("Re-extracting LC+Host features")
+                    extract_lc_and_host_features(
+                        ztf_id_ref=ztfid_ref,
+                        use_lc_for_ann_only_bool=False,
+                        show_lc=False,
+                        show_host=True,
+                        host_features=host_features,
+                    )
+
+                try:
+                    lc_and_hosts_df = pd.read_csv(
+                        f"../timeseries/{l_or_ztfid_ref}_timeseries.csv"
+                    )
+                except:
+                    print(
+                        f"couldn't feature space as function of time for {l_or_ztfid_ref}. pass."
+                    )
+                    return
+
+                if host:
+                    print(
+                        f"HOST : http://ps1images.stsci.edu/cgi-bin/ps1cutouts?pos={lc_and_hosts_df.iloc[0]['raMean']}+{lc_and_hosts_df.iloc[0]['decMean']}&filter=color\n"
+                    )
+                    host_df_ztf_id_l.append(ztfid_ref), host_df_ra_l.append(
+                        lc_and_hosts_df.iloc[0]["raMean"]
+                    ), host_df_dec_l.append(lc_and_hosts_df.iloc[0]["decMean"])
+
+                lc_and_hosts_df = (
+                    lc_and_hosts_df.dropna()
+                )  # if this drops all rows, that means something is nan from a 0 or nan entry (check data file)
+
+                try:
+                    lc_and_hosts_df_120d = lc_and_hosts_df[lc_and_host_features]
+                except:
+                    print(f"{ztfid_ref} has some NaN LC features. Skip!")
+                    return
+
+                anom_obj_df = pd.DataFrame(
+                    lc_and_hosts_df_120d.iloc[-1]
+                ).T  # last row of df to test "full LC only"
+                if host:
+                    HOST_locus_feat_arr = anom_obj_df.values[0]
+                else:
+                    LC_locus_feat_arr = anom_obj_df.values[0]
+
+            locus = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztfid_ref)
+            try:
+                tns = locus.catalog_objects["tns_public_objects"][0]
+                tns_name, tns_cls, tns_z = tns["name"], tns["type"], tns["redshift"]
+            except:
+                tns_name, tns_cls, tns_z = "No TNS", "---", -99
+            if tns_cls == "":
+                tns_cls, tns_ann_z = "---", -99
+
+        else:
+            raise ValueError("Input must be a string representing a ztfid_ref)")
+
+        if host:
+            HOST_ztfid_ref = ztfid_ref
+            HOST_tns_name, HOST_tns_cls, HOST_tns_z = tns_name, tns_cls, tns_z
+        else:
+            LC_ztfid_ref = ztfid_ref
+            LC_tns_name, LC_tns_cls, LC_tns_z = tns_name, tns_cls, tns_z
+
+    # Create new feature array with mixed lc and host features
+    subset_lc_features = LC_locus_feat_arr[:62]
+    subset_temp_host_features = HOST_locus_feat_arr[-58:]
+    locus_feat_arr = np.concatenate((subset_lc_features, subset_temp_host_features))
+
+    output_dict = {
+        "HOST_ztfid_ref": HOST_ztfid_ref,
+        "HOST_tns_name": HOST_tns_name,
+        "HOST_tns_cls": HOST_tns_cls,
+        "HOST_tns_z": HOST_tns_z,
+        "host_df_ztf_id_l": host_df_ztf_id_l,
+        "LC_ztfid_ref": LC_ztfid_ref,
+        "LC_tns_name": LC_tns_name,
+        "LC_tns_cls": LC_tns_cls,
+        "LC_tns_z": LC_tns_z,
+        "locus_feat_arr": locus_feat_arr,
+        "l_or_ztfid_ref_in_dataset_bank": l_or_ztfid_ref_in_dataset_bank,
+    }
+
+    return output_dict
+
+
+def LAISS_nearest_neighbors(
+    laiss_dict,
+    use_pca_for_nn=True,
+    annoy_index_file_path="",
+    n=8,
+    search_k=1000,
+    show_lightcurves_grid=False,
+):
+    start_time = time.time()
+    if use_pca_for_nn:
+        # 1. Scale locus_feat_arr using the same scaler (Standard Scaler)
+        scaler = preprocessing.StandardScaler()
+        trained_PCA_feat_arr = np.load(
+            # "../data/dataset_bank_orig_5472objs_pcaTrue_hostTrue_annoy_index_feat_arr.npy",
+            annoy_index_file_path + "_feat_arr.npy",
+            allow_pickle=True,
+        )
+
+        trained_PCA_feat_arr_scaled = scaler.fit_transform(
+            trained_PCA_feat_arr
+        )  # scaler needs to be fit first to the same data as trained
+
+        locus_feat_arr_scaled = scaler.transform(
+            [laiss_dict["locus_feat_arr"]]
+        )  # scaler transform new data
+
+        # 2. Transform the scaled locus_feat_arr using the same PCA model (60 PCs, RS=42)
+        n_components = 60
+        random_seed = 42
+        pca = PCA(n_components=n_components, random_state=random_seed)
+        trained_PCA_feat_arr_scaled_pca = pca.fit_transform(
+            trained_PCA_feat_arr_scaled
+        )  # pca needs to be fit first to the same data as trained
+        locus_feat_arr_pca = pca.transform(
+            locus_feat_arr_scaled
+        )  # pca transform  new data
+
+        index_nm = annoy_index_file_path
+        index_file = index_nm + ".ann"
+        index_dim = n_components  # Dimension of the PCA index
+
+        # 3. Use the ANNOY index to find nearest neighbors
+        print("Loading previously saved ANNOY LC+HOST PCA=60 index")
+        print(index_file)
+
+        index = annoy.AnnoyIndex(index_dim, metric="manhattan")
+        index.load(index_file)
+        idx_arr = np.load(f"{index_nm}_idx_arr.npy", allow_pickle=True)
+
+        ann_start_time = time.time()
+        ann_indexes, ann_dists = index.get_nns_by_vector(
+            locus_feat_arr_pca[0], n=n, search_k=search_k, include_distances=True
+        )
+        ann_alerce_links = [
+            f"https://alerce.online/object/{idx_arr[i]}" for i in ann_indexes
+        ]
+        ann_end_time = time.time()
+    else:
+        # Create or load the ANNOY index
+        index_nm = annoy_index_file_path
+        index_file = index_nm + ".ann"
+        index_dim = 62
+
+        # 3. Use the ANNOY index to find nearest neighbors
+        print("Loading previously saved ANNOY LC+HOST index without PCA:")
+        print(index_file)
+
+        index = annoy.AnnoyIndex(index_dim, metric="manhattan")
+        index.load(index_file)
+        idx_arr = np.load(f"{index_nm}_idx_arr.npy", allow_pickle=True)
+
+        ann_start_time = time.time()
+        ann_indexes, ann_dists = index.get_nns_by_vector(
+            locus_feat_arr[:62], n=n, search_k=search_k, include_distances=True
+        )
+        print(ann_indexes)
+        ann_alerce_links = [
+            f"https://alerce.online/object/{idx_arr[i]}" for i in ann_indexes
+        ]
+        ann_end_time = time.time()
+
+    # 4. Get TNS, spec. class of ANNs
+    tns_ann_names, tns_ann_classes, tns_ann_zs = [], [], []
+    ann_locus_l = []
+    for i in ann_indexes:
+        ann_locus = antares_client.search.get_by_ztf_object_id(ztf_object_id=idx_arr[i])
+        ann_locus_l.append(ann_locus)
+        try:
+            ann_tns = ann_locus.catalog_objects["tns_public_objects"][0]
+            tns_ann_name, tns_ann_cls, tns_ann_z = (
+                ann_tns["name"],
+                ann_tns["type"],
+                ann_tns["redshift"],
+            )
+        except:
+            tns_ann_name, tns_ann_cls, tns_ann_z = "No TNS", "---", -99
+        if tns_ann_cls == "":
+            tns_ann_cls, tns_ann_z = "---", -99
+        tns_ann_names.append(tns_ann_name), tns_ann_classes.append(
+            tns_ann_cls
+        ), tns_ann_zs.append(tns_ann_z)
+        laiss_dict["host_df_ztf_id_l"].append(idx_arr[i])
+
+    # Print the nearest neighbors
+    print("\t\t\t\t\t   ZTFID IAU_NAME SPEC Z")
+    print(
+        f"LC REF: https://alerce.online/object/{laiss_dict['LC_ztfid_ref']} {laiss_dict['LC_tns_name']} {laiss_dict['LC_tns_cls']} {laiss_dict['LC_tns_z']}"
+    )
+    print(
+        f"HOST REF: https://alerce.online/object/{laiss_dict['HOST_ztfid_ref']} {laiss_dict['HOST_tns_name']} {laiss_dict['HOST_tns_cls']} {laiss_dict['HOST_tns_z']}"
+    )
+
+    ann_num_l = []
+    for i, (al, iau_name, spec_cls, z) in enumerate(
+        zip(ann_alerce_links, tns_ann_names, tns_ann_classes, tns_ann_zs)
+    ):
+        if i == 0:
+            # continue
+            pass
+        print(f"ANN={i}: {al} {iau_name} {spec_cls}, {z}")
+        ann_num_l.append(i)
+
+    end_time = time.time()
+    ann_elapsed_time = ann_end_time - ann_start_time
+    elapsed_time = end_time - start_time
+    print(f"\nANN elapsed_time = {round(ann_elapsed_time, 3)} s")
+    print(f"\ntotal elapsed_time = {round(elapsed_time, 3)} s\n")
+
+    if show_lightcurves_grid:
+        print("Making a plot of stacked lightcurves...")
+
+        if laiss_dict["LC_tns_z"] is None:
+            laiss_dict["LC_tns_z"] = "None"
+        elif isinstance(laiss_dict["LC_tns_z"], float):
+            laiss_dict["LC_tns_z"] = round(laiss_dict["LC_tns_z"], 3)
+        else:
+            laiss_dict["LC_tns_z"] = laiss_dict["LC_tns_z"]
+
+        ref_info = antares_client.search.get_by_ztf_object_id(
+            ztf_object_id=laiss_dict["LC_ztfid_ref"]
+        )
+        try:
+            df_ref = ref_info.timeseries.to_pandas()
+        except:
+            print("No timeseries data...pass!")
+            pass
+
+        fig, ax = plt.subplots(figsize=(9.5, 6))
+
+        df_ref_g = df_ref[(df_ref.ant_passband == "g") & (~df_ref.ant_mag.isna())]
+        df_ref_r = df_ref[(df_ref.ant_passband == "R") & (~df_ref.ant_mag.isna())]
+
+        mjd_idx_at_min_mag_r_ref = df_ref_r[["ant_mag"]].reset_index().idxmin().ant_mag
+        mjd_idx_at_min_mag_g_ref = df_ref_g[["ant_mag"]].reset_index().idxmin().ant_mag
+
+        ax.errorbar(
+            x=df_ref_r.ant_mjd - df_ref_r.ant_mjd.iloc[mjd_idx_at_min_mag_r_ref],
+            y=df_ref_r.ant_mag.min() - df_ref_r.ant_mag,
+            yerr=df_ref_r.ant_magerr,
+            fmt="o",
+            c="r",
+            label=f"LC REF: {laiss_dict['LC_ztfid_ref']}, HOST REF: {laiss_dict['HOST_ztfid_ref']}, For LC: d=0\n{laiss_dict['LC_tns_name']},\t{laiss_dict['LC_tns_cls']},\tz={laiss_dict['LC_tns_z']}",
+        )
+        ax.errorbar(
+            x=df_ref_g.ant_mjd - df_ref_g.ant_mjd.iloc[mjd_idx_at_min_mag_g_ref],
+            y=df_ref_g.ant_mag.min() - df_ref_g.ant_mag,
+            yerr=df_ref_g.ant_magerr,
+            fmt="o",
+            c="g",
+        )
+
+        markers = ["s", "*", "x", "P", "^", "v", "D", "<", ">", "8", "p", "x"]
+        consts = [3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36]
+
+        if laiss_dict["l_or_ztfid_ref_in_dataset_bank"]:
+            ann_locus_l = ann_locus_l[1:]
+            host_df_ztf_id_l = laiss_dict["host_df_ztf_id_l"]
+            ann_dists = ann_dists[1:]
+            tns_ann_names = tns_ann_names[1:]
+            tns_ann_classes = tns_ann_classes[1:]
+            tns_ann_zs = tns_ann_zs[1:]
+
+        for num, (l_info, ztfname, dist, iau_name, spec_cls, z) in enumerate(
+            zip(
+                ann_locus_l,
+                laiss_dict["host_df_ztf_id_l"][1:],
+                ann_dists,
+                tns_ann_names,
+                tns_ann_classes,
+                tns_ann_zs,
+            )
+        ):
+            try:
+                alpha = 0.25
+                c1 = "darkred"
+                c2 = "darkgreen"
+
+                if ztfname == "ZTF21achjwus" or ztfname == "ZTF20acnznol":
+                    alpha = 0.75
+
+                df_knn = l_info.timeseries.to_pandas()
+
+                df_g = df_knn[(df_knn.ant_passband == "g") & (~df_knn.ant_mag.isna())]
+                df_r = df_knn[(df_knn.ant_passband == "R") & (~df_knn.ant_mag.isna())]
+
+                mjd_idx_at_min_mag_r = df_r[["ant_mag"]].reset_index().idxmin().ant_mag
+                mjd_idx_at_min_mag_g = df_g[["ant_mag"]].reset_index().idxmin().ant_mag
+
+                ax.errorbar(
+                    x=df_r.ant_mjd - df_r.ant_mjd.iloc[mjd_idx_at_min_mag_r],
+                    y=df_r.ant_mag.min() - df_r.ant_mag,
+                    yerr=df_r.ant_magerr,
+                    fmt=markers[num],
+                    c=c1,
+                    alpha=alpha,
+                    label=f"ANN={num}: {ztfname}, d={round(dist, 2)}\n{iau_name},\t{spec_cls},\tz={round(z, 3)}",
+                )
+                ax.errorbar(
+                    x=df_g.ant_mjd - df_g.ant_mjd.iloc[mjd_idx_at_min_mag_g],
+                    y=df_g.ant_mag.min() - df_g.ant_mag,
+                    yerr=df_g.ant_magerr,
+                    fmt=markers[num],
+                    c=c2,
+                    alpha=alpha,
+                )
+
+                plt.ylabel("Apparent Mag. + Constant")
+                # plt.xlabel('Days of event') # make iloc[0]
+                plt.xlabel(
+                    "Days since peak ($r$, $g$ indep.)"
+                )  # (need r, g to be same)
+
+                if (
+                    df_ref_r.ant_mjd.iloc[0]
+                    - df_ref_r.ant_mjd.iloc[mjd_idx_at_min_mag_r_ref]
+                    <= 10
+                ):
+                    plt.xlim(
+                        (
+                            df_ref_r.ant_mjd.iloc[0]
+                            - df_ref_r.ant_mjd.iloc[mjd_idx_at_min_mag_r_ref]
+                        )
+                        - 20,
+                        df_ref_r.ant_mjd.iloc[-1] - df_ref_r.ant_mjd.iloc[0] + 15,
+                    )
+                else:
+                    plt.xlim(
+                        2
+                        * (
+                            df_ref_r.ant_mjd.iloc[0]
+                            - df_ref_r.ant_mjd.iloc[mjd_idx_at_min_mag_r_ref]
+                        ),
+                        df_ref_r.ant_mjd.iloc[-1] - df_ref_r.ant_mjd.iloc[0] + 15,
+                    )
+
+                plt.legend(
+                    frameon=False,
+                    loc="upper right",
+                    bbox_to_anchor=(0.52, 0.85, 0.5, 0.5),
+                    ncol=3,
+                    columnspacing=0.75,
+                    prop={"size": 12},
+                )
+
+                plt.grid(True)
+
+                plt.xlim(-24, 107)
+
+            except Exception as e:
+                print(
+                    f"Something went wrong with plotting {ztfname}! Error is {e}. Continue..."
+                )
+        plt.show()
+
+
+def LAISS_AD(
+    laiss_dict,
+    lc_features,
+    host_features=[],
+    ad_params={},
+):
+    lc_and_host_features = lc_features + host_features
+    n_estimators = ad_params["n_estimators"]
+    max_depth = ad_params["max_depth"]
+    random_state = ad_params["random_state"]
+    max_features = ad_params["max_features"]
+
+    figure_path = f"../models/cls=binary_n_estimators={n_estimators}_max_depth={max_depth}_rs={random_state}_max_feats={max_features}_cw=balanced/figures"
+    model_path = f"../models/SMOTE_train_test_70-30_min14_kneighbors8/cls=binary_n_estimators={n_estimators}_max_depth={max_depth}_rs={random_state}_max_feats={max_features}_cw=balanced/model"
+    if not os.path.exists(figure_path):
+        os.makedirs(figure_path)
+
+    if not os.path.exists(model_path):
+        os.makedirs(model_path)
+
+    with open(
+        f"{model_path}/cls=binary_n_estimators={n_estimators}_max_depth={max_depth}_rs={random_state}_max_feats={max_features}_cw=balanced.pkl",
+        "rb",
+    ) as f:
+        clf = pickle.load(f)
+
+    print("\nRunning AD Model...")
+
+    host = False
+    for idx, ztf_id_temp in enumerate(
+        [laiss_dict["LC_ztfid_ref"], laiss_dict["HOST_ztfid_ref"]]
+    ):
+        if idx == 1:
+            host = True
+
+        print(f"Checking if {ztf_id_temp} made before...")
+
+        timeseries_dir = os.path.abspath("../timeseries")
+        file_path = os.path.join(timeseries_dir, f"{ztf_id_temp}_timeseries.csv")
+
+        if os.path.exists(file_path):
+            print(f"{ztf_id_temp} is already made. Continue!\n")
+        else:
+            print(f"Re-extracting LC+HOST features for {ztf_id_temp}")
+            extract_lc_and_host_features(
+                ztf_id_ref=ztf_id_temp,
+                use_lc_for_ann_only_bool=False,
+                show_lc=False,
+                show_host=False,
+                host_features=host_features,
+            )
+            print(f"Completed re-extraction for {ztf_id_temp}")
+
+        try:
+            lc_and_hosts_df = pd.read_csv(f"../timeseries/{ztf_id_temp}_timeseries.csv")
+        except:
+            print(f"couldn't feature space as func of time for {ztf_id_temp}. pass.")
+            return
+
+        lc_and_hosts_df = lc_and_hosts_df.dropna()
+        try:
+            lc_and_hosts_df_120d = lc_and_hosts_df[lc_and_host_features]
+        except:
+            print(f"{ztf_id_temp} has some NaN LC features. Skip!")
+
+        if not host:
+            LC_lc_and_hosts_df = lc_and_hosts_df
+            LC_lc_and_hosts_df_120d = lc_and_hosts_df_120d
+            LC_locus = antares_client.search.get_by_ztf_object_id(
+                ztf_object_id=ztf_id_temp
+            )
+        elif host:
+            HOST_lc_and_hosts_df = lc_and_hosts_df
+            HOST_lc_and_hosts_df_120d = lc_and_hosts_df_120d
+
+    # Create combined dataframe for anomaly detection
+    LC_HOST_COMBINED_lc_and_hosts_df = LC_lc_and_hosts_df
+    same_value_columns = HOST_lc_and_hosts_df[host_features].apply(
+        lambda x: x.nunique() == 1, axis=0
+    )
+    for column in host_features:
+        if same_value_columns[column]:  # Check if all rows in the column are the same
+            LC_HOST_COMBINED_lc_and_hosts_df[column] = HOST_lc_and_hosts_df[
+                column
+            ].iloc[
+                0
+            ]  # Replace with the single host feat value
+        else:
+            print(f"ERROR: INCONSISTENT HOST FEATURE: {column}")
+
+    LC_HOST_COMBINED_lc_and_hosts_df_120d = LC_HOST_COMBINED_lc_and_hosts_df[
+        lc_and_host_features
+    ]
+
+    mod_plot_RFC_prob_vs_lc_ztfid(
+        clf=clf,
+        anom_ztfid=laiss_dict["LC_ztfid_ref"],
+        host_ztf_id=laiss_dict["HOST_ztfid_ref"],
+        anom_spec_cls=laiss_dict["LC_tns_cls"],
+        anom_spec_z=laiss_dict["LC_tns_z"],
+        anom_thresh=50,
+        lc_and_hosts_df=LC_HOST_COMBINED_lc_and_hosts_df,
+        lc_and_hosts_df_120d=LC_HOST_COMBINED_lc_and_hosts_df_120d,
+        ref_info=LC_locus,
+        savefig=False,
+        figure_path=figure_path,
+    )
