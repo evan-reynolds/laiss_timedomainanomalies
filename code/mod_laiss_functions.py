@@ -1630,6 +1630,7 @@ def LAISS_nearest_neighbors(
     n=8,
     search_k=1000,
     show_lightcurves_grid=False,
+    store_results=False,
 ):
     start_time = time.time()
     if use_pca_for_nn:
@@ -1736,14 +1737,28 @@ def LAISS_nearest_neighbors(
     )
 
     ann_num_l = []
-    for i, (al, iau_name, spec_cls, z) in enumerate(
-        zip(ann_alerce_links, tns_ann_names, tns_ann_classes, tns_ann_zs)
+    if store_results:
+        storage = []
+    for i, (al, iau_name, spec_cls, z, dist) in enumerate(
+        zip(ann_alerce_links, tns_ann_names, tns_ann_classes, tns_ann_zs, ann_dists)
     ):
         if i == 0:
             # continue
             pass
         print(f"ANN={i}: {al} {iau_name} {spec_cls}, {z}")
         ann_num_l.append(i)
+        if store_results:
+            neighbor_dict = {
+                "lightcurve_ztf": laiss_dict["LC_ztfid_ref"],
+                "host_ztf": laiss_dict["HOST_ztfid_ref"],
+                "neighbor_num": i,
+                "ztf_link": al,
+                "dist": dist,
+                "iau_name": iau_name,
+                "spec_cls": spec_cls,
+                "z": z,
+            }
+            storage.append(neighbor_dict)
 
     end_time = time.time()
     ann_elapsed_time = ann_end_time - ann_start_time
@@ -1895,7 +1910,11 @@ def LAISS_nearest_neighbors(
                 print(
                     f"Something went wrong with plotting {ztfname}! Error is {e}. Continue..."
                 )
+
         plt.show()
+
+    if store_results:
+        return pd.DataFrame(storage)
 
 
 def LAISS_AD(
