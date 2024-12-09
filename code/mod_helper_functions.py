@@ -22,6 +22,18 @@ import matplotlib.pyplot as plt
 from timeout_decorator import timeout, TimeoutError
 
 
+def getTnsData(ztf_id):
+    locus = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztf_id)
+    try:
+        tns = locus.catalog_objects["tns_public_objects"][0]
+        tns_name, tns_cls, tns_z = tns["name"], tns["type"], tns["redshift"]
+    except:
+        tns_name, tns_cls, tns_z = "No TNS", "---", -99
+    if tns_cls == "":
+        tns_cls, tns_ann_z = "---", -99
+    return tns_name, tns_cls, tns_z
+
+
 def mod_extract_lc_and_host_features(
     ztf_id_ref,
     use_lc_for_ann_only_bool,
