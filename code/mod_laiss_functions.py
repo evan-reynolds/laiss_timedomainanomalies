@@ -1637,7 +1637,6 @@ def LAISS_nearest_neighbors(
         # 1. Scale locus_feat_arr using the same scaler (Standard Scaler)
         scaler = preprocessing.StandardScaler()
         trained_PCA_feat_arr = np.load(
-            # "../data/dataset_bank_orig_5472objs_pcaTrue_hostTrue_annoy_index_feat_arr.npy",
             annoy_index_file_path + "_feat_arr.npy",
             allow_pickle=True,
         )
@@ -2024,3 +2023,322 @@ def LAISS_AD(
         savefig=False,
         figure_path=figure_path,
     )
+
+
+def host_only_build_indexed_sample(
+    fn="",
+    host_features=[],
+    pca=True,
+    n_components=None,
+    save=True,
+    force_recreation_of_index=False,
+):
+    data = pd.read_csv(fn)
+    data = data.set_index("ztf_object_id")
+    data = data[host_features]
+    data = data.dropna()
+
+    # Host features annoy index, w/ PCA
+    feat_arr = np.array(data)
+    idx_arr = np.array(data.index)
+
+    if pca:
+        scaler = preprocessing.StandardScaler()
+
+        # Set a random seed for PCA
+        random_seed = 88
+
+        # Scale the features
+        feat_arr_scaled = scaler.fit_transform(feat_arr)
+
+        # Initialize PCA
+        pcaModel = PCA(n_components=n_components, random_state=random_seed)
+
+        # Apply PCA
+        feat_arr_scaled_pca = pcaModel.fit_transform(feat_arr_scaled)
+
+    # Create or load the ANNOY index
+    index_nm = f"host_only_laiss_annoy_index_pca{pca}"
+    if save:
+        # Save the index array to a binary file
+        np.save(f"../data/{index_nm}_idx_arr.npy", idx_arr)
+        np.save(f"../data/{index_nm}_feat_arr.npy", feat_arr)
+        if pca:
+            np.save(f"../data/{index_nm}_feat_arr_scaled.npy", feat_arr_scaled)
+            np.save(f"../data/{index_nm}_feat_arr_scaled_pca.npy", feat_arr_scaled_pca)
+
+    # Create or load the ANNOY index
+    index_file = f"../data/{index_nm}.ann"  # Choose a filename
+    if pca:
+        index_dim = feat_arr_scaled_pca.shape[1]
+    else:
+        index_dim = feat_arr.shape[1]  # Dimension of the index
+
+    # Check if the index file exists
+    if not os.path.exists(index_file) or force_recreation_of_index:
+        print("Saving new ANNOY index")
+        # If the index file doesn't exist, create and build the index
+        index = annoy.AnnoyIndex(index_dim, metric="manhattan")
+
+        # Add items to the index
+        for i in range(len(idx_arr)):
+            if pca:
+                index.add_item(i, feat_arr_scaled_pca[i])
+            else:
+                index.add_item(i, feat_arr[i])
+        # Build the index
+        index.build(1000)  # 1000 trees
+
+        if save:
+            # Save the index to a file
+            index.save(index_file)
+    else:
+        print("Loading previously saved ANNOY index")
+        # If the index file exists, load it
+        index = annoy.AnnoyIndex(index_dim, metric="manhattan")
+        index.load(index_file)
+        idx_arr = np.load(f"../data/{index_nm}_idx_arr.npy", allow_pickle=True)
+
+    return index_nm
+
+
+def host_only_LAISS_primer(ztf_id, dataset_bank_path, host_features=[]):
+
+    l_or_ztfid_ref_in_dataset_bank = False
+    host_df_ztf_id_l, host_df_ra_l, host_df_dec_l = [], [], []
+
+    if ztf_id.startswith("ZTF"):
+
+        try:
+            dataset_bank_orig = pd.read_csv(dataset_bank_path, index_col=0)
+            locus_feat_arr = dataset_bank_orig.loc[ztf_id]
+            locus_feat_arr = locus_feat_arr[host_features].values
+
+            l_or_ztfid_ref_in_dataset_bank = True
+            print(f"{ztf_id} is in dataset_bank. Continuing...")
+
+        except:
+            print(
+                f"{ztf_id} is not in dataset_bank. Cannot calculate new feature space. Abort!"
+            )
+            return
+            # print(f"{ztf_id} is not in dataset_bank. Checking if made before...")
+            # if os.path.exists(f"../timeseries/{ztf_id}_timeseries.csv"):
+            #     print(f"{ztf_id} is already made. Continue!\n")
+
+            # else:
+            #     print("Re-extracting LC+Host features")
+            #     extract_lc_and_host_features(
+            #         ztf_id_ref=ztf_id,
+            #         use_lc_for_ann_only_bool=False,
+            #         show_lc=False,
+            #         show_host=True,
+            #         host_features=host_features,
+            #     )
+
+            # try:
+            #     lc_and_hosts_df = pd.read_csv(f"../timeseries/{ztf_id}_timeseries.csv")
+            # except:
+            #     print(f"couldn't feature space as function of time for {ztf_id}. pass.")
+            #     return
+
+            # print(
+            #     f"HOST : http://ps1images.stsci.edu/cgi-bin/ps1cutouts?pos={lc_and_hosts_df.iloc[0]['raMean']}+{lc_and_hosts_df.iloc[0]['decMean']}&filter=color\n"
+            # )
+            # host_df_ztf_id_l.append(ztf_id), host_df_ra_l.append(
+            #     lc_and_hosts_df.iloc[0]["raMean"]
+            # ), host_df_dec_l.append(lc_and_hosts_df.iloc[0]["decMean"])
+
+            # try:
+            #     host_feature_df = lc_and_hosts_df[host_features]
+            # except:
+            #     print(f"{ztf_id} has some NaN host features. Skip!")
+            #     return
+
+            # host_feature_df = (
+            #     host_feature_df.dropna()
+            # )  # if this drops all rows, that means something is nan from a 0 or nan entry (check data file)
+
+            # anom_obj_df = pd.DataFrame(
+            #     host_feature_df.iloc[-1]
+            # ).T  # last row of df to test "full LC only"
+
+            # locus_feat_arr = anom_obj_df.values[0]
+
+        locus = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztf_id)
+        try:
+            tns = locus.catalog_objects["tns_public_objects"][0]
+            tns_name, tns_cls, tns_z = tns["name"], tns["type"], tns["redshift"]
+        except:
+            tns_name, tns_cls, tns_z = "No TNS", "---", -99
+        if tns_cls == "":
+            tns_cls, tns_ann_z = "---", -99
+
+    else:
+        raise ValueError("Input must be a string representing a ztfid_ref)")
+
+    HOST_ztfid_ref = ztf_id
+    HOST_tns_name, HOST_tns_cls, HOST_tns_z = tns_name, tns_cls, tns_z
+
+    output_dict = {
+        "HOST_ztfid_ref": HOST_ztfid_ref,
+        "HOST_tns_name": HOST_tns_name,
+        "HOST_tns_cls": HOST_tns_cls,
+        "HOST_tns_z": HOST_tns_z,
+        "host_df_ztf_id_l": host_df_ztf_id_l,  # This is just HOST_ztfid_ref but in a length-1 list
+        "locus_feat_arr": locus_feat_arr,
+        "l_or_ztfid_ref_in_dataset_bank": l_or_ztfid_ref_in_dataset_bank,
+    }
+
+    print("Created output dictionary!")
+
+    return output_dict
+
+
+def host_only_LAISS_nearest_neighbors(
+    laiss_dict,
+    use_pca_for_nn=True,
+    n_components=15,
+    annoy_index_file_path="",
+    n=8,
+    search_k=1000,
+    return_results=False,
+):
+    start_time = time.time()
+
+    locus_feat_arr = laiss_dict["locus_feat_arr"]
+
+    if use_pca_for_nn:
+        # 1. Scale locus_feat_arr using the same scaler (Standard Scaler)
+        scaler = preprocessing.StandardScaler()
+        trained_PCA_feat_arr = np.load(
+            annoy_index_file_path + "_feat_arr.npy",
+            allow_pickle=True,
+        )
+
+        trained_PCA_feat_arr_scaled = scaler.fit_transform(
+            trained_PCA_feat_arr
+        )  # scaler needs to be fit first to the same data as trained
+
+        locus_feat_arr_scaled = scaler.transform(
+            [laiss_dict["locus_feat_arr"]]
+        )  # scaler transform new data
+
+        # 2. Transform the scaled locus_feat_arr using the same PCA model
+        n_components = n_components
+        random_seed = 88
+        pca = PCA(n_components=n_components, random_state=random_seed)
+        trained_PCA_feat_arr_scaled_pca = pca.fit_transform(
+            trained_PCA_feat_arr_scaled
+        )  # pca needs to be fit first to the same data as trained
+        locus_feat_arr_pca = pca.transform(
+            locus_feat_arr_scaled
+        )  # pca transform  new data
+
+        index_nm = annoy_index_file_path
+        index_file = index_nm + ".ann"
+        index_dim = n_components  # Dimension of the PCA index
+
+        # 3. Use the ANNOY index to find nearest neighbors
+        print(f"Loading previously saved ANNOY LC+HOST PCA={n_components} index")
+        print(index_file)
+
+        index = annoy.AnnoyIndex(index_dim, metric="manhattan")
+        index.load(index_file)
+        idx_arr = np.load(f"{index_nm}_idx_arr.npy", allow_pickle=True)
+
+        ann_start_time = time.time()
+        ann_indexes, ann_dists = index.get_nns_by_vector(
+            locus_feat_arr_pca[0], n=n, search_k=search_k, include_distances=True
+        )
+        ann_alerce_links = [
+            f"https://alerce.online/object/{idx_arr[i]}" for i in ann_indexes
+        ]
+        ann_end_time = time.time()
+    else:
+        # Create or load the ANNOY index
+        index_nm = annoy_index_file_path
+        index_file = index_nm + ".ann"
+        index_dim = len(laiss_dict["locus_feat_arr"])
+
+        # 3. Use the ANNOY index to find nearest neighbors
+        print("Loading previously saved ANNOY LC+HOST index without PCA:")
+        print(index_file)
+
+        index = annoy.AnnoyIndex(index_dim, metric="manhattan")
+        index.load(index_file)
+        idx_arr = np.load(f"{index_nm}_idx_arr.npy", allow_pickle=True)
+
+        ann_start_time = time.time()
+        ann_indexes, ann_dists = index.get_nns_by_vector(
+            locus_feat_arr,
+            n=n,
+            search_k=search_k,
+            include_distances=True,
+        )
+        ann_alerce_links = [
+            f"https://alerce.online/object/{idx_arr[i]}" for i in ann_indexes
+        ]
+        ann_end_time = time.time()
+
+    # 4. Get TNS, spec. class of ANNs
+    tns_ann_names, tns_ann_classes, tns_ann_zs = [], [], []
+    ann_locus_l = []
+    for i in ann_indexes:
+        ann_locus = antares_client.search.get_by_ztf_object_id(ztf_object_id=idx_arr[i])
+        ann_locus_l.append(ann_locus)
+        try:
+            ann_tns = ann_locus.catalog_objects["tns_public_objects"][0]
+            tns_ann_name, tns_ann_cls, tns_ann_z = (
+                ann_tns["name"],
+                ann_tns["type"],
+                ann_tns["redshift"],
+            )
+        except:
+            tns_ann_name, tns_ann_cls, tns_ann_z = "No TNS", "---", -99
+        if tns_ann_cls == "":
+            tns_ann_cls, tns_ann_z = "---", -99
+        tns_ann_names.append(tns_ann_name), tns_ann_classes.append(
+            tns_ann_cls
+        ), tns_ann_zs.append(tns_ann_z)
+        laiss_dict["host_df_ztf_id_l"].append(idx_arr[i])
+
+    # Print the nearest neighbors
+    print("\t\t\t\t\t   ZTFID IAU_NAME SPEC Z")
+    # print(
+    #     f"LC REF: https://alerce.online/object/{laiss_dict['LC_ztfid_ref']} {laiss_dict['LC_tns_name']} {laiss_dict['LC_tns_cls']} {laiss_dict['LC_tns_z']}"
+    # )
+    print(
+        f"HOST REF: https://alerce.online/object/{laiss_dict['HOST_ztfid_ref']} {laiss_dict['HOST_tns_name']} {laiss_dict['HOST_tns_cls']} {laiss_dict['HOST_tns_z']}"
+    )
+
+    ann_num_l = []
+    if return_results:
+        storage = []
+    for i, (al, iau_name, spec_cls, z, dist) in enumerate(
+        zip(ann_alerce_links, tns_ann_names, tns_ann_classes, tns_ann_zs, ann_dists)
+    ):
+        if i == 0:
+            continue
+        print(f"ANN={i}: {al} {iau_name} {spec_cls}, {z}")
+        ann_num_l.append(i)
+        if return_results:
+            neighbor_dict = {
+                "input_host_ztf_id": laiss_dict["HOST_ztfid_ref"],
+                "neighbor_num": i,
+                "ztf_link": al,
+                "dist": dist,
+                "iau_name": iau_name,
+                "spec_cls": spec_cls,
+                "z": z,
+            }
+            storage.append(neighbor_dict)
+
+    end_time = time.time()
+    ann_elapsed_time = ann_end_time - ann_start_time
+    elapsed_time = end_time - start_time
+    print(f"\nANN elapsed_time = {round(ann_elapsed_time, 3)} s")
+    print(f"\ntotal elapsed_time = {round(elapsed_time, 3)} s\n")
+
+    if return_results:
+        return pd.DataFrame(storage)

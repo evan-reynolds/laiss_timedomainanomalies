@@ -221,9 +221,8 @@ def mod_extract_lc_and_host_features(
             )
             print(f"Saved results for {ztf_id_ref}!\n")
 
-        return lc_and_hosts_df
-
     else:
+        ra, dec = np.mean(df_ref.ant_ra), np.mean(df_ref.ant_dec)
         lc_properties_df = lc_properties_df.set_index("ztf_object_id")
 
         if store_csv:
@@ -232,7 +231,9 @@ def mod_extract_lc_and_host_features(
             )
             print(f"Saved results for {ztf_id_ref}!\n")
 
-        return lc_and_hosts_df
+    lc_and_hosts_df["ra"] = ra
+    lc_and_hosts_df["dec"] = dec
+    return lc_and_hosts_df
 
 
 def get_base_name(path):
