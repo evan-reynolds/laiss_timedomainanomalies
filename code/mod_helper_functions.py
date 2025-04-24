@@ -17,6 +17,14 @@ import astropy.units as u
 import os
 import tempfile
 import matplotlib.pyplot as plt
+from sfdmap2 import sfdmap
+from dust_extinction.parameter_averages import G23
+import constants
+from sklearn.preprocessing import StandardScaler
+from scipy.stats import gamma, halfnorm, uniform
+
+# from astro_prost.helpers import SnRateAbsmag
+# from astro_prost.associate import associate_sample
 
 # GHOST getTransientHosts function with timeout
 from timeout_decorator import timeout, TimeoutError
@@ -979,3 +987,474 @@ def host_pdfs(
     if save_pdf:
         pdf_pages.close()
         print(f"PDF saved at: {pdf_path}")
+
+
+def re_getExtinctionCorrectedMag(
+    transient_row,
+    band,
+    av_in_raw_df_bank,
+    path_to_sfd_folder=None,
+):
+    central_wv_filters = {"g": 4849.11, "r": 6201.20, "i": 7534.96, "z": 8674.20}
+    MW_RV = 3.1
+    ext = G23(Rv=MW_RV)
+
+    if av_in_raw_df_bank:
+        MW_AV = transient_row["A_V"]
+    else:
+        m = sfdmap.SFDMap(path_to_sfd_folder)
+        MW_EBV = m.ebv(float(transient_row["ra"]), float(transient_row["dec"]))
+        MW_AV = MW_RV * MW_EBV
+
+    wv_filter = central_wv_filters[band]
+    A_filter = -2.5 * np.log10(ext.extinguish(wv_filter * u.AA, Av=MW_AV))
+
+    return transient_row[band + "KronMag"] - A_filter
+
+
+def re_build_dataset_bank(raw_df_bank, av_in_raw_df_bank, path_to_sfd_folder=None):
+    # from constants.py
+    raw_lc_features = constants.lc_features_const.copy()
+    raw_host_features = constants.raw_host_features_const.copy()
+
+    if av_in_raw_df_bank:
+        if "A_V" not in raw_host_features:
+            raw_host_features.append("A_V")
+    else:
+        for col in ["ra", "dec"]:
+            if col not in raw_lc_features:
+                raw_lc_features.append(col)
+
+    # if "ztf_object_id" is the index, move it to the first column
+    if raw_df_bank.index.name == "ztf_object_id":
+        raw_df_bank = raw_df_bank.reset_index()
+
+    raw_features = ["ztf_object_id"] + raw_lc_features + raw_host_features
+
+    # Check to make sure all required features are in the raw data
+    missing_cols = [col for col in raw_features if col not in raw_df_bank.columns]
+    if missing_cols:
+        print(
+            f"KeyError: The following columns are not in the raw data provided: {missing_cols}. Abort!"
+        )
+        return
+
+    wip_dataset_bank = raw_df_bank.replace([np.inf, -np.inf, -999], np.nan).dropna(
+        subset=raw_features
+    )
+
+    # Create ell features
+    for band in ["g", "r", "i", "z"]:
+        xx = wip_dataset_bank[band + "momentXX"]
+        yy = wip_dataset_bank[band + "momentYY"]
+        xy = wip_dataset_bank[band + "momentXY"]
+        wip_dataset_bank[band + "ell"] = np.sqrt(
+            ((xx - yy) / (xx + yy)) ** 2 + (2 * xy / (xx + yy)) ** 2
+        )
+
+    # Correct magnitude features for dust
+    for band in ["g", "r", "i", "z"]:
+        print(f"Engineering features for band {band}...")
+        wip_dataset_bank[band + "KronMagCorrected"] = wip_dataset_bank.apply(
+            lambda row: re_getExtinctionCorrectedMag(
+                transient_row=row,
+                band=band,
+                av_in_raw_df_bank=av_in_raw_df_bank,
+                path_to_sfd_folder=path_to_sfd_folder,
+            ),
+            axis=1,
+        )
+
+    # Create color features
+    wip_dataset_bank["gminusrKronMag"] = (
+        wip_dataset_bank["gKronMag"] - wip_dataset_bank["rKronMag"]
+    )
+    wip_dataset_bank["rminusiKronMag"] = (
+        wip_dataset_bank["rKronMag"] - wip_dataset_bank["iKronMag"]
+    )
+    wip_dataset_bank["iminuszKronMag"] = (
+        wip_dataset_bank["iKronMag"] - wip_dataset_bank["zKronMag"]
+    )
+
+    # Calculate color uncertainties
+    wip_dataset_bank["gminusrKronMagErr"] = np.sqrt(
+        wip_dataset_bank["gKronMagErr"] ** 2 + wip_dataset_bank["rKronMagErr"] ** 2
+    )
+    wip_dataset_bank["rminusiKronMagErr"] = np.sqrt(
+        wip_dataset_bank["rKronMagErr"] ** 2 + wip_dataset_bank["iKronMagErr"] ** 2
+    )
+    wip_dataset_bank["iminuszKronMagErr"] = np.sqrt(
+        wip_dataset_bank["iKronMagErr"] ** 2 + wip_dataset_bank["zKronMagErr"] ** 2
+    )
+
+    # color features down-weighting outliers
+    epsilon = 0.01
+    for feat in ["gminusrKronMag", "rminusiKronMag", "iminuszKronMag"]:
+        median = wip_dataset_bank[feat].median()
+        wip_dataset_bank[feat + "_mod"] = np.sqrt(
+            (wip_dataset_bank[feat] ** 2)
+            / ((wip_dataset_bank[feat] - median) ** 2 + epsilon)
+        )
+
+    # standardize final LAISS features
+    final_features = (
+        constants.lc_features_const.copy() + constants.host_features_const.copy()
+    )
+    scaler = StandardScaler()
+    wip_dataset_bank[final_features] = scaler.fit_transform(
+        wip_dataset_bank[final_features]
+    )
+
+    final_df_bank = wip_dataset_bank
+
+    return final_df_bank
+
+
+def re_extract_lc_and_host_features(
+    ztf_id,
+    path_to_timeseries_folder,
+    path_to_sfd_data_folder,
+    show_lc=False,
+    show_host=True,
+    store_csv=False,
+):
+    start_time = time.time()
+    df_path = path_to_timeseries_folder
+
+    # Look up transient
+    try:
+        ref_info = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztf_id)
+        df_ref = ref_info.timeseries.to_pandas()
+    except:
+        print("antares_client can't find this object. Skip! Continue...")
+        return
+
+    # Check for observations
+    df_ref_g = df_ref[(df_ref.ant_passband == "g") & (~df_ref.ant_mag.isna())]
+    df_ref_r = df_ref[(df_ref.ant_passband == "R") & (~df_ref.ant_mag.isna())]
+    try:
+        mjd_idx_at_min_mag_r_ref = df_ref_r[["ant_mag"]].reset_index().idxmin().ant_mag
+        mjd_idx_at_min_mag_g_ref = df_ref_g[["ant_mag"]].reset_index().idxmin().ant_mag
+    except:
+        print(f"No observations for {ztf_id}. pass!\n")
+        return
+
+    # Plot lightcurve
+    if show_lc:
+        fig, ax = plt.subplots(figsize=(7, 7))
+        plt.gca().invert_yaxis()
+
+        ax.errorbar(
+            x=df_ref_r.ant_mjd,
+            y=df_ref_r.ant_mag,
+            yerr=df_ref_r.ant_magerr,
+            fmt="o",
+            c="r",
+            label=f"REF: {ztf_id}",
+        )
+        ax.errorbar(
+            x=df_ref_g.ant_mjd,
+            y=df_ref_g.ant_mag,
+            yerr=df_ref_g.ant_magerr,
+            fmt="o",
+            c="g",
+        )
+        plt.show()
+
+    # Minimuim number of observations to use lightcurve
+    min_obs_count = 4
+
+    # Pull lightcurve features
+    lightcurve = ref_info.lightcurve
+    feature_names, property_names, features_count = create_base_features_class(
+        MAGN_EXTRACTOR, FLUX_EXTRACTOR
+    )
+
+    g_obs = list(get_detections(lightcurve, "g").ant_mjd.values)
+    r_obs = list(get_detections(lightcurve, "R").ant_mjd.values)
+    mjd_l = sorted(g_obs + r_obs)
+
+    lc_properties_d_l = []  # using as list of dictionaries
+
+    band_lc = lightcurve[(~lightcurve["ant_mag"].isna())]
+    idx = ~MaskedColumn(band_lc["ant_mag"]).mask
+    all_detections = remove_simultaneous_alerts(band_lc[idx])
+
+    for ob, mjd in enumerate(mjd_l):  # requires 4 observations
+        # do time evolution of detections - in chunks
+        detections_pb = all_detections[all_detections["ant_mjd"].values <= mjd]
+        lc_properties_d = {}
+        for band, names in property_names.items():
+            detections = detections_pb[detections_pb["ant_passband"] == band]
+
+            # Ensure locus has enough (>3) obs for calculation
+            if len(detections) < min_obs_count:
+                continue
+
+            t = detections["ant_mjd"].values
+            m = detections["ant_mag"].values
+            merr = detections["ant_magerr"].values
+            flux = np.power(10.0, -0.4 * m)
+            fluxerr = (
+                0.5 * flux * (np.power(10.0, 0.4 * merr) - np.power(10.0, -0.4 * merr))
+            )
+
+            magn_features = MAGN_EXTRACTOR(t, m, merr, fill_value=None)
+            flux_features = FLUX_EXTRACTOR(t, flux, fluxerr, fill_value=None)
+
+            # After successfully calculating features, set locus properties and tag
+            lc_properties_d["obs_num"] = int(ob)
+            lc_properties_d["mjd_cutoff"] = mjd
+            lc_properties_d["ztf_object_id"] = ztf_id
+            for name, value in zip(names, chain(magn_features, flux_features)):
+                lc_properties_d[name] = value
+
+        lc_properties_d_l.append(lc_properties_d)  # Storing dictionary
+
+    lc_properties_d_l = [d for d in lc_properties_d_l if d]  # remove empty elements
+    lc_properties_df = pd.DataFrame(lc_properties_d_l)
+    if len(lc_properties_df) == 0:
+        print(f"Not enough observations for {ztf_id}. pass!\n")
+        return
+
+    end_time = time.time()
+    print(
+        f"Extracted lightcurve features for for {ztf_id} in {(end_time - start_time):.2f}s!"
+    )
+
+    # Get GHOST features
+    ra, dec = np.mean(df_ref.ant_ra), np.mean(df_ref.ant_dec)
+    snName = [ztf_id, ztf_id]
+    snCoord = [
+        SkyCoord(ra * u.deg, dec * u.deg, frame="icrs"),
+        SkyCoord(ra * u.deg, dec * u.deg, frame="icrs"),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            hosts = getTransientHosts_with_timeout(
+                transientName=snName,
+                transientCoord=snCoord,
+                GLADE=True,
+                verbose=0,
+                starcut="gentle",
+                ascentMatch=False,
+                savepath=tmp,
+                redo_search=False,
+            )
+        except:
+            print(f"GHOST error for {ztf_id}. Retry without GLADE. \n")
+            hosts = getTransientHosts_with_timeout(
+                transientName=snName,
+                transientCoord=snCoord,
+                GLADE=False,
+                verbose=0,
+                starcut="gentle",
+                ascentMatch=False,
+                savepath=tmp,
+                redo_search=False,
+            )
+
+    if len(hosts) >= 1:
+        hosts_df = pd.DataFrame(hosts.loc[0]).T
+    else:
+        print(f"Cannot identify host galaxy for {ztf_id}. Abort!\n")
+        return
+
+    # Check if required host features are missing
+    raw_host_feature_check = constants.raw_host_features_const.copy()
+    hosts_df = hosts[raw_host_feature_check]
+    hosts_df = hosts_df[~hosts_df.isnull().any(axis=1)]
+    if len(hosts_df) < 1:
+        # if any features are nan, we can't use as input
+        print(f"Some features are NaN for {ztf_id}. Skip!\n")
+        return
+
+    if show_host:
+        print(
+            f"Host galaxy identified for {ztf_id}: http://ps1images.stsci.edu/cgi-bin/ps1cutouts?pos={hosts.raMean.values[0]}+{hosts.decMean.values[0]}&filter=color"
+        )
+
+    hosts_df = pd.concat([hosts_df] * len(lc_properties_df), ignore_index=True)
+
+    lc_and_hosts_df = pd.concat([lc_properties_df, hosts_df], axis=1)
+    lc_and_hosts_df = lc_and_hosts_df.set_index("ztf_object_id")
+    lc_and_hosts_df["raMean"] = hosts.raMean.values[0]
+    lc_and_hosts_df["decMean"] = hosts.decMean.values[0]
+    if not os.path.exists(df_path):
+        print(f"Creating path {df_path}.")
+        os.makedirs(df_path)
+
+    # Lightcurve ra and dec may be needed in feature engineering
+    lc_and_hosts_df["ra"] = ra
+    lc_and_hosts_df["dec"] = dec
+
+    # Engineer necessary features
+    lc_and_hosts_df_hydrated = re_build_dataset_bank(
+        raw_df_bank=lc_and_hosts_df,
+        av_in_raw_df_bank=False,
+        path_to_sfd_folder=path_to_sfd_data_folder,
+    )
+
+    if store_csv and not lc_and_hosts_df_hydrated.empty:
+        lc_and_hosts_df_hydrated.to_csv(f"{df_path}/{ztf_id}_timeseries.csv")
+        print(f"Saved results for {ztf_id}!\n")
+
+    return lc_and_hosts_df_hydrated
+
+
+def re_AD_and_plots(
+    clf,
+    input_ztf_id,
+    swapped_host_ztf_id,
+    input_spec_cls,
+    input_spec_z,
+    anom_thresh,
+    timeseries_df_full,
+    timeseries_df_features_only,
+    ref_info,
+    savefig,
+    figure_path,
+):
+    anom_obj_df = timeseries_df_features_only
+
+    pred_prob_anom = 100 * clf.predict_proba(anom_obj_df)
+    pred_prob_anom[:, 0] = [round(a, 1) for a in pred_prob_anom[:, 0]]
+    pred_prob_anom[:, 1] = [round(b, 1) for b in pred_prob_anom[:, 1]]
+    num_anom_epochs = len(np.where(pred_prob_anom[:, 1] >= anom_thresh)[0])
+
+    try:
+        anom_idx = timeseries_df_full.iloc[
+            np.where(pred_prob_anom[:, 1] >= anom_thresh)[0][0]
+        ].obs_num
+        anom_idx_is = True
+        print("Anomalous during timeseries!")
+
+    except:
+        print(
+            f"Prediction doesn't exceed anom_threshold of {anom_thresh}% for {input_ztf_id}."
+        )
+        anom_idx_is = False
+
+    max_anom_score = max(pred_prob_anom[:, 1])
+    print("max_anom_score", round(max_anom_score, 1))
+    print("num_anom_epochs", num_anom_epochs, "\n")
+
+    df_ref = ref_info.timeseries.to_pandas()
+
+    df_ref_g = df_ref[(df_ref.ant_passband == "g") & (~df_ref.ant_mag.isna())]
+    df_ref_r = df_ref[(df_ref.ant_passband == "R") & (~df_ref.ant_mag.isna())]
+
+    mjd_idx_at_min_mag_r_ref = df_ref_r[["ant_mag"]].reset_index().idxmin().ant_mag
+    mjd_idx_at_min_mag_g_ref = df_ref_g[["ant_mag"]].reset_index().idxmin().ant_mag
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(7, 10))
+    ax1.invert_yaxis()
+    ax1.errorbar(
+        x=df_ref_r.ant_mjd,
+        y=df_ref_r.ant_mag,
+        yerr=df_ref_r.ant_magerr,
+        fmt="o",
+        c="r",
+        label=r"ZTF-$r$",
+    )
+    ax1.errorbar(
+        x=df_ref_g.ant_mjd,
+        y=df_ref_g.ant_mag,
+        yerr=df_ref_g.ant_magerr,
+        fmt="o",
+        c="g",
+        label=r"ZTF-$g$",
+    )
+    if anom_idx_is == True:
+        ax1.axvline(
+            x=timeseries_df_full[
+                timeseries_df_full.obs_num == anom_idx
+            ].mjd_cutoff.values[0],
+            label="Tag anomalous",
+            color="dodgerblue",
+            ls="--",
+        )
+        mjd_cross_thresh = round(
+            timeseries_df_full[
+                timeseries_df_full.obs_num == anom_idx
+            ].mjd_cutoff.values[0],
+            3,
+        )
+
+        left, right = ax1.get_xlim()
+        mjd_anom_per = (mjd_cross_thresh - left) / (right - left)
+        plt.text(
+            mjd_anom_per + 0.073,
+            -0.075,
+            f"t$_a$ = {int(mjd_cross_thresh)}",
+            horizontalalignment="center",
+            verticalalignment="center",
+            transform=ax1.transAxes,
+            fontsize=16,
+            color="dodgerblue",
+        )
+        print("MJD crossed thresh:", mjd_cross_thresh)
+
+    ax2.plot(
+        timeseries_df_full.mjd_cutoff,
+        pred_prob_anom[:, 0],
+        drawstyle="steps",
+        label=r"$p(Normal)$",
+    )
+    ax2.plot(
+        timeseries_df_full.mjd_cutoff,
+        pred_prob_anom[:, 1],
+        drawstyle="steps",
+        label=r"$p(Anomaly)$",
+    )
+
+    if input_spec_z is None:
+        input_spec_z = "None"
+    elif isinstance(input_spec_z, float):
+        input_spec_z = round(input_spec_z, 3)
+    else:
+        input_spec_z = input_spec_z
+    ax1.set_title(
+        rf"{input_ztf_id} ({input_spec_cls}, $z$={input_spec_z})"
+        + (f" with host from {swapped_host_ztf_id}" if swapped_host_ztf_id else ""),
+        pad=25,
+    )
+    plt.xlabel("MJD")
+    ax1.set_ylabel("Magnitude")
+    ax2.set_ylabel("Probability (%)")
+
+    if anom_idx_is == True:
+        ax1.legend(
+            loc="upper right",
+            ncol=3,
+            bbox_to_anchor=(1.0, 1.12),
+            frameon=False,
+            fontsize=14,
+        )
+    else:
+        ax1.legend(
+            loc="upper right",
+            ncol=2,
+            bbox_to_anchor=(0.75, 1.12),
+            frameon=False,
+            fontsize=14,
+        )
+    ax2.legend(
+        loc="upper right",
+        ncol=2,
+        bbox_to_anchor=(0.87, 1.12),
+        frameon=False,
+        fontsize=14,
+    )
+
+    ax1.grid(True)
+    ax2.grid(True)
+
+    if savefig:
+        plt.savefig(
+            f"{figure_path}/{input_ztf_id}_AD_run_timeseries.pdf",
+            dpi=300,
+            bbox_inches="tight",
+        )
+
+    plt.show()

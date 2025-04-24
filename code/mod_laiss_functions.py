@@ -3,11 +3,13 @@ from helper_functions import *
 import pandas as pd
 import numpy as np
 import os
+import sys
 import annoy
 from annoy import AnnoyIndex
 from sklearn import preprocessing
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
+from kneed import KneeLocator
 import pickle
 
 
@@ -1696,7 +1698,10 @@ def LAISS_nearest_neighbors(
 
         ann_start_time = time.time()
         ann_indexes, ann_dists = index.get_nns_by_vector(
-            locus_feat_arr[:62], n=n, search_k=search_k, include_distances=True
+            laiss_dict["locus_feat_arr"][:62],
+            n=n,
+            search_k=search_k,
+            include_distances=True,
         )
         print(ann_indexes)
         ann_alerce_links = [
@@ -2057,10 +2062,9 @@ def host_only_build_indexed_sample(
         # Apply PCA
         feat_arr_scaled_pca = pcaModel.fit_transform(feat_arr_scaled)
 
-    # Create or load the ANNOY index
+    # Save the index array to a binary file
     index_nm = f"host_only_laiss_annoy_index_pca{pca}"
     if save:
-        # Save the index array to a binary file
         np.save(f"../data/{index_nm}_idx_arr.npy", idx_arr)
         np.save(f"../data/{index_nm}_feat_arr.npy", feat_arr)
         if pca:
@@ -2074,9 +2078,8 @@ def host_only_build_indexed_sample(
     else:
         index_dim = feat_arr.shape[1]  # Dimension of the index
 
-    # Check if the index file exists
     if not os.path.exists(index_file) or force_recreation_of_index:
-        print("Saving new ANNOY index")
+        print(f"Building new ANNOY index with {data.shape[0]} transients...")
         # If the index file doesn't exist, create and build the index
         index = annoy.AnnoyIndex(index_dim, metric="manhattan")
 
@@ -2093,11 +2096,13 @@ def host_only_build_indexed_sample(
             # Save the index to a file
             index.save(index_file)
     else:
-        print("Loading previously saved ANNOY index")
+        print("Loading previously saved ANNOY index...")
         # If the index file exists, load it
         index = annoy.AnnoyIndex(index_dim, metric="manhattan")
         index.load(index_file)
         idx_arr = np.load(f"../data/{index_nm}_idx_arr.npy", allow_pickle=True)
+
+    print("Done!")
 
     return index_nm
 
@@ -2110,8 +2115,10 @@ def host_only_LAISS_primer(ztf_id, dataset_bank_path, host_features=[]):
     if ztf_id.startswith("ZTF"):
 
         try:
-            dataset_bank_orig = pd.read_csv(dataset_bank_path, index_col=0)
-            locus_feat_arr = dataset_bank_orig.loc[ztf_id]
+            dataset_bank = pd.read_csv(dataset_bank_path, index_col=0)[
+                host_features
+            ].dropna()
+            locus_feat_arr = dataset_bank.loc[ztf_id]
             locus_feat_arr = locus_feat_arr[host_features].values
 
             l_or_ztfid_ref_in_dataset_bank = True
@@ -2119,8 +2126,9 @@ def host_only_LAISS_primer(ztf_id, dataset_bank_path, host_features=[]):
 
         except:
             print(
-                f"{ztf_id} is not in dataset_bank. Cannot calculate new feature space. Abort!"
+                f"{ztf_id} has NA features or is not in dataset bank. Cannot calculate new feature space. Abort!"
             )
+            sys.exit(1)
             return
             # print(f"{ztf_id} is not in dataset_bank. Checking if made before...")
             # if os.path.exists(f"../timeseries/{ztf_id}_timeseries.csv"):
@@ -2201,6 +2209,7 @@ def host_only_LAISS_nearest_neighbors(
     n_components=15,
     annoy_index_file_path="",
     n=8,
+    max_neighbor_dist=np.inf,
     search_k=1000,
     return_results=False,
 ):
@@ -2240,7 +2249,7 @@ def host_only_LAISS_nearest_neighbors(
         index_dim = n_components  # Dimension of the PCA index
 
         # 3. Use the ANNOY index to find nearest neighbors
-        print(f"Loading previously saved ANNOY LC+HOST PCA={n_components} index")
+        print(f"Loading previously saved ANNOY PCA={n_components} index")
         print(index_file)
 
         index = annoy.AnnoyIndex(index_dim, metric="manhattan")
@@ -2262,7 +2271,7 @@ def host_only_LAISS_nearest_neighbors(
         index_dim = len(laiss_dict["locus_feat_arr"])
 
         # 3. Use the ANNOY index to find nearest neighbors
-        print("Loading previously saved ANNOY LC+HOST index without PCA:")
+        print("Loading previously saved ANNOY index without PCA:")
         print(index_file)
 
         index = annoy.AnnoyIndex(index_dim, metric="manhattan")
@@ -2280,6 +2289,56 @@ def host_only_LAISS_nearest_neighbors(
             f"https://alerce.online/object/{idx_arr[i]}" for i in ann_indexes
         ]
         ann_end_time = time.time()
+
+    # Plot neighbor number vs distance and find optimal number of neighbors:
+    neighbor_numbers_for_plot = list(range(1, len(ann_dists)))
+    dists_for_plot = ann_dists[1:]
+
+    knee = KneeLocator(
+        neighbor_numbers_for_plot,
+        dists_for_plot,
+        curve="concave",
+        direction="increasing",
+    )
+    optimal_k = knee.knee
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(neighbor_numbers_for_plot, dists_for_plot, marker="o", label="Distances")
+    if optimal_k:
+        plt.axvline(
+            optimal_k, color="red", linestyle="--", label=f"Elbow at {optimal_k}"
+        )
+    plt.xlabel("Neighbor Number")
+    plt.ylabel("Distance")
+    plt.title("Distance for Closest Neighbors")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    print(
+        f"Suggested number of neighbors: {optimal_k}. Suggested Maximum Distance: {round(dists_for_plot[optimal_k-1], 2)}"
+    )
+
+    # Filter for distance:
+    filtered_neighbors = [
+        (idx, dist)
+        for idx, dist in zip(ann_indexes, ann_dists)
+        if dist <= abs(max_neighbor_dist)
+    ]
+    ann_indexes, ann_dists = (
+        zip(*filtered_neighbors) if filtered_neighbors else ([], [])
+    )
+    ann_indexes = list(ann_indexes)
+    ann_dists = list(ann_dists)
+    # Minus 1 because host itself will always be a neighbor (dist = 0)
+    number_of_neighbors_found = len(ann_indexes) - 1
+    if number_of_neighbors_found == 0:
+        print(
+            f"No neighbors found for distance threshold of {abs(max_neighbor_dist)}. Please try a larger maximum distance."
+        )
+    else:
+        print("Number of neighbors found:", number_of_neighbors_found)
 
     # 4. Get TNS, spec. class of ANNs
     tns_ann_names, tns_ann_classes, tns_ann_zs = [], [], []
@@ -2342,3 +2401,772 @@ def host_only_LAISS_nearest_neighbors(
 
     if return_results:
         return pd.DataFrame(storage)
+
+
+def re_build_indexed_sample(
+    dataset_bank_path,
+    lc_features=[],
+    host_features=[],
+    use_pca=False,
+    n_components=None,
+    num_trees=1000,
+    index_folder_relative_path="",
+    save=True,
+    force_recreation_of_index=False,
+):
+    df_bank = pd.read_csv(dataset_bank_path)
+
+    # Confirm that the first column is the ZTF ID, and index by ZTF ID
+    if df_bank.columns[0] != "ztf_object_id":
+        print(
+            f"Error: Expected first column in dataset bank to be '{ztf_object_id}', but got '{df_bank.columns[0]}' instead."
+        )
+        sys.exit(1)
+    df_bank = df_bank.set_index("ztf_object_id")
+
+    # Ensure proper user input of features
+    num_lc_features = len(lc_features)
+    num_host_features = len(host_features)
+    if num_lc_features + num_host_features == 0:
+        print("Error: must provide at least one lightcurve or host feature.")
+        sys.exit(1)
+    if num_lc_features == 0:
+        print(
+            f"No lightcurve features provided. Running host-only LAISS with {num_host_features} features."
+        )
+    if num_host_features == 0:
+        print(
+            f"No host features provided. Running lightcurve-only LAISS with {num_lc_features} features."
+        )
+
+    # Filtering dataset bank for provided features
+    df_bank = df_bank[lc_features + host_features]
+    df_bank = df_bank.dropna()
+    feat_arr = np.array(df_bank)
+    idx_arr = np.array(df_bank.index)
+
+    # Apply PCA if necessary
+    if use_pca:
+        random_seed = 88
+        scaler = preprocessing.StandardScaler()
+
+        feat_arr_scaled = scaler.fit_transform(feat_arr)
+
+        pcaModel = PCA(n_components=n_components, random_state=random_seed)
+        feat_arr_scaled_pca = pcaModel.fit_transform(feat_arr_scaled)
+
+    # Save PCA and non-PCA index arrays to binary files
+    index_stem_name = (
+        f"re_laiss_annoy_index_pca{use_pca}"
+        + (f"_{n_components}comps" if use_pca else "")
+        + f"_{num_lc_features}lc_{num_host_features}host"
+    )
+    index_stem_name_with_path = index_folder_relative_path + "/" + index_stem_name
+    if save:
+        np.save(f"{index_stem_name_with_path}_idx_arr.npy", idx_arr)
+        np.save(f"{index_stem_name_with_path}_feat_arr.npy", feat_arr)
+        if use_pca:
+            np.save(
+                f"{index_stem_name_with_path}_feat_arr_scaled.npy",
+                feat_arr_scaled,
+            )
+            np.save(
+                f"{index_stem_name_with_path}_feat_arr_scaled_pca.npy",
+                feat_arr_scaled_pca,
+            )
+
+    # Create or load the ANNOY index:
+    index_file = f"{index_stem_name_with_path}.ann"
+    index_dim = feat_arr_scaled_pca.shape[1] if use_pca else feat_arr.shape[1]
+
+    # If the ANNOY index already exists, use it
+    if os.path.exists(index_file) and not force_recreation_of_index:
+        print("Loading previously saved ANNOY index...")
+        index = annoy.AnnoyIndex(index_dim, metric="manhattan")
+        index.load(index_file)
+        idx_arr = np.load(
+            f"{index_stem_name_with_path}_idx_arr.npy",
+            allow_pickle=True,
+        )
+
+    # Otherwise, create a new index
+    else:
+        print(f"Building new ANNOY index with {df_bank.shape[0]} transients...")
+
+        index = annoy.AnnoyIndex(index_dim, metric="manhattan")
+        for i in range(len(idx_arr)):
+            index.add_item(i, feat_arr_scaled_pca[i] if use_pca else feat_arr[i])
+
+        index.build(num_trees)
+
+        if save:
+            index.save(index_file)
+
+    print("Done!")
+
+    return index_stem_name_with_path
+
+
+def re_get_timeseries_df(
+    ztf_id,
+    path_to_timeseries_folder,
+    path_to_sfd_data_folder,
+):
+    # Check if timeseries already made
+    print(f"Checking if timeseries dataframe for {ztf_id} already exists...")
+    if os.path.exists(f"{path_to_timeseries_folder}/{ztf_id}_timeseries.csv"):
+        timeseries_df = pd.read_csv(
+            f"{path_to_timeseries_folder}/{ztf_id}_timeseries.csv"
+        )
+        print(f"Timeseries dataframe for {ztf_id} is already made. Continue!\n")
+
+    # If timeseries is not already made, create it by extracting features
+    else:
+        print(
+            f"Timeseries dataframe does not exist. Re-extracting lightcurve and host features for {ztf_id}."
+        )
+        timeseries_df = re_extract_lc_and_host_features(
+            ztf_id=ztf_id,
+            path_to_timeseries_folder=path_to_timeseries_folder,
+            path_to_sfd_data_folder=path_to_sfd_data_folder,
+            show_lc=False,
+            show_host=True,
+            store_csv=True,
+        )
+    return timeseries_df
+
+
+def re_LAISS_primer(
+    lc_ztf_id,
+    dataset_bank_path,
+    path_to_timeseries_folder,
+    path_to_sfd_data_folder,
+    host_ztf_id=None,
+    lc_features=[],
+    host_features=[],
+):
+
+    feature_names = lc_features + host_features
+
+    # Loop through lightcurve object and host object to create feature array
+    for ztf_id, host_loop in [(lc_ztf_id, False), (host_ztf_id, True)]:
+
+        # Skip host loop if not swapping out host galaxy
+        if ztf_id is None:
+            continue
+
+        ztf_id_in_dataset_bank = False
+
+        # Check if ztf_id is in dataset bank
+        try:
+            df_bank = pd.read_csv(dataset_bank_path, index_col=0)
+            # Check to make sure all features are in the dataset bank
+            missing_cols = [col for col in feature_names if col not in df_bank.columns]
+            if missing_cols:
+                print(
+                    f"KeyError: The following columns are not in the raw data provided: {missing_cols}. Abort!"
+                )
+                return
+            locus_feat_arr = df_bank.loc[ztf_id]
+
+            ztf_id_in_dataset_bank = True
+            print(f"{ztf_id} is in dataset_bank.")
+
+        # If ztf_if is not in dataset bank...
+        except:
+            # Extract timeseries dataframe
+            print(f"{ztf_id} is not in dataset_bank.")
+            timeseries_df = re_get_timeseries_df(
+                ztf_id=ztf_id,
+                path_to_timeseries_folder=path_to_timeseries_folder,
+                path_to_sfd_data_folder=path_to_sfd_data_folder,
+            )
+
+            timeseries_df = timeseries_df[lc_features + host_features]
+            timeseries_df = timeseries_df.dropna()
+
+            if timeseries_df.empty:
+                print(f"{ztf_id} has some NaN features. Abort!")
+                sys.exit(1)
+
+            # Extract feature array from timeseries dataframe
+            locus_feat_arr_df = pd.DataFrame(timeseries_df.iloc[-1]).T
+            locus_feat_arr = locus_feat_arr_df.iloc[0]
+
+        # Pull TNS data for ztf_id
+        locus = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztf_id)
+        try:
+            tns = locus.catalog_objects["tns_public_objects"][0]
+            tns_name, tns_cls, tns_z = tns["name"], tns["type"], tns["redshift"]
+        except:
+            tns_name, tns_cls, tns_z = "No TNS", "---", -99
+        if tns_cls == "":
+            tns_cls, tns_ann_z = "---", -99
+
+        if host_loop:
+            host_tns_name, host_tns_cls, host_tns_z = tns_name, tns_cls, tns_z
+            host_ztf_id_in_dataset_bank = ztf_id_in_dataset_bank
+            host_locus_feat_arr = locus_feat_arr
+        else:
+            lc_tns_name, lc_tns_cls, lc_tns_z = tns_name, tns_cls, tns_z
+            lc_ztf_id_in_dataset_bank = ztf_id_in_dataset_bank
+            lc_locus_feat_arr = locus_feat_arr
+
+    # Make final feature array
+    if host_ztf_id is None:
+        # Not swapping out host, use features from lightcurve ztf_id
+        locus_feat_arr = lc_locus_feat_arr[feature_names].values
+    else:
+        # Create new feature array with mixed lc and host features
+        subset_lc_features = lc_locus_feat_arr[lc_features]
+        subset_host_features = host_locus_feat_arr[host_features]
+        locus_feat_arr = np.concatenate((subset_lc_features, subset_host_features))
+
+    output_dict = {
+        # host data is optional, it's only if the user decides to swap in a new host
+        "host_ztf_id": host_ztf_id if host_ztf_id is not None else None,
+        "host_tns_name": host_tns_name if host_ztf_id is not None else None,
+        "host_tns_cls": host_tns_cls if host_ztf_id is not None else None,
+        "host_tns_z": host_tns_z if host_ztf_id is not None else None,
+        "host_ztf_id_in_dataset_bank": (
+            host_ztf_id_in_dataset_bank if host_ztf_id is not None else None
+        ),
+        "lc_ztf_id": lc_ztf_id,
+        "lc_tns_name": lc_tns_name,
+        "lc_tns_cls": lc_tns_cls,
+        "lc_tns_z": lc_tns_z,
+        "lc_ztf_id_in_dataset_bank": lc_ztf_id_in_dataset_bank,
+        "locus_feat_arr": locus_feat_arr,
+    }
+
+    return output_dict
+
+
+def re_plot_lightcurves(
+    primer_dict,
+    neighbor_ztfids,
+    ann_locus_l,
+    ann_dists,
+    tns_ann_names,
+    tns_ann_classes,
+    tns_ann_zs,
+):
+    print("Making a plot of stacked lightcurves...")
+
+    if primer_dict["lc_tns_z"] is None:
+        primer_dict["lc_tns_z"] = "None"
+    elif isinstance(primer_dict["lc_tns_z"], float):
+        primer_dict["lc_tns_z"] = round(primer_dict["lc_tns_z"], 3)
+    else:
+        primer_dict["lc_tns_z"] = primer_dict["lc_tns_z"]
+
+    ref_info = antares_client.search.get_by_ztf_object_id(
+        ztf_object_id=primer_dict["lc_ztf_id"]
+    )
+    try:
+        df_ref = ref_info.timeseries.to_pandas()
+    except:
+        print("No timeseries data...pass!")
+        pass
+
+    fig, ax = plt.subplots(figsize=(9.5, 6))
+
+    df_ref_g = df_ref[(df_ref.ant_passband == "g") & (~df_ref.ant_mag.isna())]
+    df_ref_r = df_ref[(df_ref.ant_passband == "R") & (~df_ref.ant_mag.isna())]
+
+    mjd_idx_at_min_mag_r_ref = df_ref_r[["ant_mag"]].reset_index().idxmin().ant_mag
+    mjd_idx_at_min_mag_g_ref = df_ref_g[["ant_mag"]].reset_index().idxmin().ant_mag
+
+    ax.errorbar(
+        x=df_ref_r.ant_mjd - df_ref_r.ant_mjd.iloc[mjd_idx_at_min_mag_r_ref],
+        y=df_ref_r.ant_mag.min() - df_ref_r.ant_mag,
+        yerr=df_ref_r.ant_magerr,
+        fmt="o",
+        c="r",
+        label=(
+            f"{primer_dict['lc_ztf_id']}"
+            + (
+                f" w/ host from {primer_dict['host_ztf_id']},"
+                if primer_dict["host_ztf_id"] is not None
+                else ","
+            )
+            + f"\nd=0, {primer_dict['lc_tns_name']}, {primer_dict['lc_tns_cls']}, z={primer_dict['lc_tns_z']}"
+        ),
+    )
+    ax.errorbar(
+        x=df_ref_g.ant_mjd - df_ref_g.ant_mjd.iloc[mjd_idx_at_min_mag_g_ref],
+        y=df_ref_g.ant_mag.min() - df_ref_g.ant_mag,
+        yerr=df_ref_g.ant_magerr,
+        fmt="o",
+        c="g",
+    )
+
+    markers = ["s", "*", "x", "P", "^", "v", "D", "<", ">", "8", "p", "x"]
+    consts = [3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36]
+
+    for num, (l_info, ztfname, dist, iau_name, spec_cls, z) in enumerate(
+        zip(
+            ann_locus_l,
+            neighbor_ztfids,
+            ann_dists,
+            tns_ann_names,
+            tns_ann_classes,
+            tns_ann_zs,
+        )
+    ):
+        # Plots up to 8 neighbors
+        if num + 1 > 8:
+            print(
+                "Lightcurve plotter only plots up to 8 neighbors. Stopping at neighbor 8."
+            )
+            break
+        try:
+            alpha = 0.25
+            c1 = "darkred"
+            c2 = "darkgreen"
+
+            df_knn = l_info.timeseries.to_pandas()
+
+            df_g = df_knn[(df_knn.ant_passband == "g") & (~df_knn.ant_mag.isna())]
+            df_r = df_knn[(df_knn.ant_passband == "R") & (~df_knn.ant_mag.isna())]
+
+            mjd_idx_at_min_mag_r = df_r[["ant_mag"]].reset_index().idxmin().ant_mag
+            mjd_idx_at_min_mag_g = df_g[["ant_mag"]].reset_index().idxmin().ant_mag
+
+            ax.errorbar(
+                x=df_r.ant_mjd - df_r.ant_mjd.iloc[mjd_idx_at_min_mag_r],
+                y=df_r.ant_mag.min() - df_r.ant_mag,
+                yerr=df_r.ant_magerr,
+                fmt=markers[num],
+                c=c1,
+                alpha=alpha,
+                label=f"ANN={num+1}:{ztfname}, d={round(dist, 2)},\n{iau_name}, {spec_cls}, z={round(z, 3)}",
+            )
+            ax.errorbar(
+                x=df_g.ant_mjd - df_g.ant_mjd.iloc[mjd_idx_at_min_mag_g],
+                y=df_g.ant_mag.min() - df_g.ant_mag,
+                yerr=df_g.ant_magerr,
+                fmt=markers[num],
+                c=c2,
+                alpha=alpha,
+            )
+
+            plt.ylabel("Apparent Mag. + Constant")
+            plt.xlabel("Days since peak ($r$, $g$ indep.)")  # (need r, g to be same)
+
+            if (
+                df_ref_r.ant_mjd.iloc[0]
+                - df_ref_r.ant_mjd.iloc[mjd_idx_at_min_mag_r_ref]
+                <= 10
+            ):
+                plt.xlim(
+                    (
+                        df_ref_r.ant_mjd.iloc[0]
+                        - df_ref_r.ant_mjd.iloc[mjd_idx_at_min_mag_r_ref]
+                    )
+                    - 20,
+                    df_ref_r.ant_mjd.iloc[-1] - df_ref_r.ant_mjd.iloc[0] + 15,
+                )
+            else:
+                plt.xlim(
+                    2
+                    * (
+                        df_ref_r.ant_mjd.iloc[0]
+                        - df_ref_r.ant_mjd.iloc[mjd_idx_at_min_mag_r_ref]
+                    ),
+                    df_ref_r.ant_mjd.iloc[-1] - df_ref_r.ant_mjd.iloc[0] + 15,
+                )
+
+            shift, scale = 1.4, 0.975
+            if len(neighbor_ztfids) <= 2:
+                shift = 1.175
+                scale = 0.9
+            elif len(neighbor_ztfids) <= 5:
+                shift = 1.3
+                scale = 0.925
+
+            plt.legend(
+                frameon=False,
+                loc="upper center",
+                bbox_to_anchor=(0.5, shift),
+                ncol=3,
+                prop={"size": 10},
+            )
+            plt.grid(True)
+
+            # Shrink axes to leave space above for the legend
+            box = ax.get_position()
+            ax.set_position([box.x0, box.y0, box.width, box.height * scale])
+
+        except Exception as e:
+            print(
+                f"Something went wrong with plotting {ztfname}! Error is {e}. Continue..."
+            )
+
+    plt.show()
+
+
+def re_LAISS_nearest_neighbors(
+    primer_dict,
+    annoy_index_file_stem,
+    use_pca=False,
+    num_pca_components=15,
+    n=8,
+    suggest_neighbor_num=False,
+    max_neighbor_dist=None,
+    search_k=1000,
+    return_results=False,
+):
+    start_time = time.time()
+    index_file = annoy_index_file_stem + ".ann"
+
+    if n is None or n <= 0:
+        print("Neighbor number must be a nonzero integer. Abort!")
+        return
+
+    if use_pca:
+        # 1. Scale locus_feat_arr using the same scaler (Standard Scaler)
+        scaler = preprocessing.StandardScaler()
+        trained_PCA_feat_arr = np.load(
+            annoy_index_file_stem + "_feat_arr.npy",
+            allow_pickle=True,
+        )
+
+        # scaler needs to be fit first to the same data as trained
+        trained_PCA_feat_arr_scaled = scaler.fit_transform(trained_PCA_feat_arr)
+
+        # scaler transform new data
+        locus_feat_arr_scaled = scaler.transform([primer_dict["locus_feat_arr"]])
+
+        # 2. Transform the scaled locus_feat_arr using the same PCA model
+        random_seed = 88
+        pca = PCA(n_components=num_pca_components, random_state=random_seed)
+
+        # pca needs to be fit first to the same data as trained
+        trained_PCA_feat_arr_scaled_pca = pca.fit_transform(trained_PCA_feat_arr_scaled)
+
+        # pca transform new data
+        locus_feat_arr_pca = pca.transform(locus_feat_arr_scaled)
+
+        print(
+            f"Loading previously saved ANNOY PCA={num_pca_components} index:",
+            index_file,
+        )
+        index_dim = num_pca_components
+        query_vector = locus_feat_arr_pca[0]
+
+    else:
+        print("Loading previously saved ANNOY index without PCA:", index_file)
+        index_dim = len(primer_dict["locus_feat_arr"])
+        query_vector = primer_dict["locus_feat_arr"]
+
+    # 3. Use the ANNOY index to find nearest neighbors (common to both branches)
+    index = annoy.AnnoyIndex(index_dim, metric="manhattan")
+    index.load(index_file)
+    idx_arr = np.load(f"{annoy_index_file_stem}_idx_arr.npy", allow_pickle=True)
+
+    ann_start_time = time.time()
+    ann_indexes, ann_dists = index.get_nns_by_vector(
+        query_vector, n=n, search_k=search_k, include_distances=True
+    )
+
+    if round(ann_dists[0]) == 0:
+        print(
+            "First neighbor is input transient, so it will be excluded. The final neighbor count will be one less than expected."
+        )
+        # drop first neighbor, which is input transient
+        ann_dists = ann_dists[1:]
+        ann_indexes = ann_indexes[1:]
+
+    ann_alerce_links = [
+        f"https://alerce.online/object/{idx_arr[i]}" for i in ann_indexes
+    ]
+    ann_end_time = time.time()
+
+    # Find optimal number of neighbors
+    if suggest_neighbor_num:
+        number_of_neighbors_found = len(ann_dists)
+        neighbor_numbers_for_plot = list(range(1, number_of_neighbors_found + 1))
+
+        knee = KneeLocator(
+            neighbor_numbers_for_plot,
+            ann_dists,
+            curve="concave",
+            direction="increasing",
+        )
+        optimal_n = knee.knee
+
+        if optimal_n is not None:
+            print(
+                f"Suggested number of neighbors is {optimal_n}, chosen by comparing {n} neighbors."
+            )
+        else:
+            print(
+                "Couldn't identify optimal number of neighbors. Try a larger neighbor pool."
+            )
+
+        plt.figure(figsize=(10, 4))
+        plt.plot(
+            neighbor_numbers_for_plot,
+            ann_dists,
+            marker="o",
+            label="Distances",
+        )
+        if optimal_n:
+            plt.axvline(
+                optimal_n, color="red", linestyle="--", label=f"Elbow at {optimal_n}"
+            )
+        plt.xlabel("Neighbor Number")
+        plt.ylabel("Distance")
+        plt.title("Distance for Closest Neighbors")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+    # Filter neighbors for maximum distance, if provided
+    if max_neighbor_dist is not None:
+        filtered_neighbors = [
+            (idx, dist)
+            for idx, dist in zip(ann_indexes, ann_dists)
+            if dist <= abs(max_neighbor_dist)
+        ]
+        ann_indexes, ann_dists = (
+            zip(*filtered_neighbors) if filtered_neighbors else ([], [])
+        )
+        ann_indexes = list(ann_indexes)
+        ann_dists = list(ann_dists)
+
+        if len(ann_dists) == 0:
+            print(
+                f"No neighbors found for distance threshold of {abs(max_neighbor_dist)}. Try a larger maximum distance."
+            )
+        else:
+            print(
+                f"Found {len(ann_dists)} neighbors for distance threshold of {abs(max_neighbor_dist)}."
+            )
+
+    # 4. Get TNS, spec. class of neighbors
+    tns_ann_names, tns_ann_classes, tns_ann_zs, neighbor_ztfids = [], [], [], []
+    ann_locus_l = []
+    for i in ann_indexes:
+        neighbor_ztfids.append(idx_arr[i])
+        ann_locus = antares_client.search.get_by_ztf_object_id(ztf_object_id=idx_arr[i])
+        ann_locus_l.append(ann_locus)
+        try:
+            ann_tns = ann_locus.catalog_objects["tns_public_objects"][0]
+            tns_ann_name, tns_ann_cls, tns_ann_z = (
+                ann_tns["name"],
+                ann_tns["type"],
+                ann_tns["redshift"],
+            )
+        except:
+            tns_ann_name, tns_ann_cls, tns_ann_z = "No TNS", "---", -99
+        if tns_ann_cls == "":
+            tns_ann_cls, tns_ann_z = "---", -99
+        tns_ann_names.append(tns_ann_name), tns_ann_classes.append(
+            tns_ann_cls
+        ), tns_ann_zs.append(tns_ann_z)
+
+    # Print the nearest neighbors and organize them for storage
+    print("\t\t\t\t\t\t ZTFID     IAU_NAME SPEC  Z")
+    print(
+        f"Input transient: https://alerce.online/object/{primer_dict['lc_ztf_id']} {primer_dict['lc_tns_name']} {primer_dict['lc_tns_cls']} {primer_dict['lc_tns_z']}"
+    )
+    if primer_dict["host_ztf_id"] is not None:
+        print(
+            f"Transient with host swapped into input: https://alerce.online/object/{primer_dict['host_ztf_id']} {primer_dict['host_tns_name']} {primer_dict['host_tns_cls']} {primer_dict['host_tns_z']}"
+        )
+
+    # Print lightcurves
+    re_plot_lightcurves(
+        primer_dict=primer_dict,
+        neighbor_ztfids=neighbor_ztfids,
+        ann_locus_l=ann_locus_l,
+        ann_dists=ann_dists,
+        tns_ann_names=tns_ann_names,
+        tns_ann_classes=tns_ann_classes,
+        tns_ann_zs=tns_ann_zs,
+    )
+
+    storage = []
+    neighbor_num = 1
+    for al, iau_name, spec_cls, z, dist in zip(
+        ann_alerce_links, tns_ann_names, tns_ann_classes, tns_ann_zs, ann_dists
+    ):
+        print(f"ANN={neighbor_num}: {al} {iau_name} {spec_cls}, {z}")
+        if return_results:
+            neighbor_dict = {
+                "input_ztf_id": primer_dict["lc_ztf_id"],
+                "input_swapped_host_ztf_id": primer_dict["host_ztf_id"],
+                "neighbor_num": neighbor_num,
+                "ztf_link": al,
+                "dist": dist,
+                "iau_name": iau_name,
+                "spec_cls": spec_cls,
+                "z": z,
+            }
+            storage.append(neighbor_dict)
+        neighbor_num += 1
+
+    end_time = time.time()
+    ann_elapsed_time = ann_end_time - ann_start_time
+    elapsed_time = end_time - start_time
+    print(f"\nANN elapsed_time: {round(ann_elapsed_time, 3)} s")
+    print(f"\ntotal elapsed_time: {round(elapsed_time, 3)} s\n")
+
+    if return_results:
+        return pd.DataFrame(storage)
+
+
+def re_anomaly_detection(
+    laiss_dict,
+    lc_features,
+    host_features,
+    path_to_timeseries_folder,
+    path_to_sfd_data_folder,
+    n_estimators,
+    max_depth,
+    random_state,
+    max_features,
+):
+    # Load the model
+    figure_path = f"../models/cls=binary_n_estimators={n_estimators}_max_depth={max_depth}_rs={random_state}_max_feats={max_features}_cw=balanced/figures"
+    model_path = f"../models/SMOTE_train_test_70-30_min14_kneighbors8/cls=binary_n_estimators={n_estimators}_max_depth={max_depth}_rs={random_state}_max_feats={max_features}_cw=balanced/model"
+    if not os.path.exists(figure_path):
+        os.makedirs(figure_path)
+    if not os.path.exists(model_path):
+        os.makedirs(model_path)
+
+    with open(
+        f"{model_path}/cls=binary_n_estimators={n_estimators}_max_depth={max_depth}_rs={random_state}_max_feats={max_features}_cw=balanced.pkl",
+        "rb",
+    ) as f:
+        clf = pickle.load(f)
+
+    print("\nRunning AD Model...")
+
+    # Load the timeseries dataframe
+    timeseries_df = re_get_timeseries_df(
+        ztf_id=laiss_dict["lc_ztf_id"],
+        path_to_timeseries_folder=path_to_timeseries_folder,
+        path_to_sfd_data_folder=path_to_sfd_data_folder,
+    )
+
+    if laiss_dict["host_ztf_id"] is not None:
+        # Swap in the host galaxy
+        swapped_host_timeseries_df = re_get_timeseries_df(
+            ztf_id=laiss_dict["host_ztf_id"],
+            path_to_timeseries_folder=path_to_timeseries_folder,
+            path_to_sfd_data_folder=path_to_sfd_data_folder,
+        )
+
+        host_values = swapped_host_timeseries_df[host_features].iloc[0]
+        for col in host_features:
+            timeseries_df[col] = host_values[col]
+
+    timeseries_df_filt_feats = timeseries_df[lc_features + host_features]
+    input_lightcurve_locus = antares_client.search.get_by_ztf_object_id(
+        ztf_object_id=laiss_dict["lc_ztf_id"]
+    )
+
+    re_AD_and_plots(
+        clf=clf,
+        input_ztf_id=laiss_dict["lc_ztf_id"],
+        swapped_host_ztf_id=laiss_dict["host_ztf_id"],
+        input_spec_cls=laiss_dict["lc_tns_cls"],
+        input_spec_z=laiss_dict["lc_tns_z"],
+        anom_thresh=50,
+        timeseries_df_full=timeseries_df,
+        timeseries_df_features_only=timeseries_df_filt_feats,
+        ref_info=input_lightcurve_locus,
+        savefig=False,
+        figure_path=figure_path,
+    )
+    return
+
+
+def re_LAISS(
+    transient_ztf_id,  # transient on which to run laiss
+    path_to_dataset_bank,
+    path_to_timeseries_folder,
+    host_ztf_id_to_swap_in=None,  # will swap the host galaxy of the input transient to this transient's host
+    host_feature_names=[],  # Leave blank for lightcurve-only LAISS
+    lc_feature_names=[],  # Leave blank for host-only LAISS
+    path_to_sfd_data_folder="../data/sfddata-master",  # to correct extracted magnitudes for dust; not needed if transient_ztf_id in dataset bank
+    use_pca=False,
+    num_pca_components=20,  # Only matters if use_pca = True
+    force_recreation_of_annoy_index=False,  # Rebuild indexed space for ANNOY even if it already exists
+    index_folder_relative_path="../data/re_LAISS/index_files",  # folder to store ANNOY indices
+    path_to_ghost_database="../data/host_info",
+    neighbors=10,  # will return this number of neighbors unless filtered by max_neighbor_distance
+    suggest_neighbor_num=False,  # plot distances of neighbors to help choose optimal neighbor number
+    max_neighbor_distance=None,  # optional, will return all neighbors below this distance (but no more than the 'neighbors' argument)
+    search_k=5000,  # for ANNOY search
+    return_neighbor_results=True,  # returns a list of neighbor dictionaries
+    run_AD=True,  # run anomaly detection
+    n_estimators=100,  # anomaly detection parameter
+    max_depth=35,  # anomaly detection parameter
+    random_state=11,  # anomaly detection parameter
+    max_features=35,  # anomaly detection parameter
+):
+    # build ANNOY indexed sample from dataset bank
+    index_stem_name_with_path = re_build_indexed_sample(
+        dataset_bank_path=path_to_dataset_bank,
+        lc_features=lc_feature_names,
+        host_features=host_feature_names,
+        use_pca=use_pca,
+        n_components=num_pca_components,
+        num_trees=1000,
+        index_folder_relative_path=index_folder_relative_path,
+        save=True,
+        force_recreation_of_index=force_recreation_of_annoy_index,
+    )
+
+    # set up GHOST file structure
+    host_path = path_to_ghost_database
+    if not os.path.exists(host_path):
+        os.makedirs(host_path)
+    os.environ["GHOST_PATH"] = host_path
+
+    # run primer
+    primer_dict = re_LAISS_primer(
+        lc_ztf_id=transient_ztf_id,
+        host_ztf_id=host_ztf_id_to_swap_in,
+        dataset_bank_path=path_to_dataset_bank,
+        path_to_timeseries_folder=path_to_timeseries_folder,
+        path_to_sfd_data_folder=path_to_sfd_data_folder,
+        lc_features=lc_feature_names,
+        host_features=host_feature_names,
+    )
+
+    # nearest neighbors search
+    nearest_neighbors_df = re_LAISS_nearest_neighbors(
+        primer_dict=primer_dict,
+        annoy_index_file_stem=index_stem_name_with_path,
+        use_pca=use_pca,
+        num_pca_components=num_pca_components,
+        n=neighbors,
+        suggest_neighbor_num=suggest_neighbor_num,
+        max_neighbor_dist=max_neighbor_distance,
+        search_k=search_k,
+        return_results=return_neighbor_results,
+    )
+
+    # annomaly detection
+    if run_AD:
+        re_anomaly_detection(
+            laiss_dict=primer_dict,
+            lc_features=lc_feature_names,
+            host_features=host_feature_names,
+            path_to_timeseries_folder=path_to_timeseries_folder,
+            path_to_sfd_data_folder=path_to_sfd_data_folder,
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            random_state=random_state,
+            max_features=max_features,
+        )
+
+    if return_neighbor_results:
+        return nearest_neighbors_df
+    return

@@ -64,3 +64,26 @@ data/sfddata-master/.SFD_dust_4096_ngp.fits.icloud
 data/sfddata-master/README.md
 data/sfddata-master/.SFD_mask_4096_sgp.fits.icloud
 models/SMOTE_train_test_70-30_min14_kneighbors8/cls=binary_n_estimators=100_max_depth=35_rs=11_max_feats=35_cw=balanced/model/.cls=binary_n_estimators=100_max_depth=35_rs=11_max_feats=35_cw=balanced.pkl.icloud
+code/build_feat_lib.py
+data/dataset_bank_orig_5472objs_pcaFalse_hostTrue_annoy_index_feat_arr.npy
+code/__pycache__/constants.cpython-39.pyc
+data/dataset_bank_orig_5472objs_pcaFalse_hostTrue_annoy_index.ann
+data/dataset_bank_orig_w_hosts_ra_dec_5472objs.csv
+data/final_dataset_bank_host_only_laiss.csv
+data/final_dataset_bank_re_laiss.csv
+data/final_standardized_dataset_bank_re_laiss.csv
+data/GHOST_withZTFNames.csv
+data/dataset_bank_orig_5472objs_pcaFalse_hostTrue_annoy_index_idx_arr.npy
+data/loci_df_271688objects_cut_stars_and_gal_plane_pcaFalse_hostFalse_annoy_index 2.ann
+data/OLD_FEATURES_final_dataset_bank_re_laiss.csv
+data/old_host_features.txt
+data/old_lc_features.txt
+data/ZTFBTS_noCuts_hostdata.csv
+data/sfddata-master/SFD_dust_4096_ngp.fits
+data/sfddata-master/SFD_dust_4096_sgp.fits
+data/sfddata-master/SFD_mask_4096_ngp.fits
+data/sfddata-master/SFD_mask_4096_sgp.fits
+database/GHOST.csv
+timeseries/ZTF18acbwasc_timeseries.csv
+timeseries/ZTF19aazgpar_timeseries.csv
+timeseries/ZTF24abeiqfc_timeseries.csv
