@@ -479,7 +479,6 @@ def mod_LAISS(
         # 1, 2, 3. Don't use PCA at all. Just use LC features only + ANNOY index to find nearest neighbors
         # Create or load the ANNOY index
 
-        # TODO: make argument for which file
         # index_nm = "dataset_bank_LCfeats_only_annoy_index" #5k, 1000 trees
         # index_file = "../dataset_bank_LCfeats_only_annoy_index.ann" #5k, 1000 trees
 
@@ -807,7 +806,7 @@ def mod_LAISS(
 
         plt.show()
 
-    if show_hosts_grid:  # TODO: Get images to show (currently all red squares)
+    if show_hosts_grid:
         print("\nGenerating hosts grid plot...")
 
         dataset_bank_orig_w_hosts_ra_dec = pd.read_csv(
@@ -2419,7 +2418,7 @@ def re_build_indexed_sample(
     # Confirm that the first column is the ZTF ID, and index by ZTF ID
     if df_bank.columns[0] != "ztf_object_id":
         print(
-            f"Error: Expected first column in dataset bank to be '{ztf_object_id}', but got '{df_bank.columns[0]}' instead."
+            f"Error: Expected first column in dataset bank to be 'ztf_object_id', but got '{df_bank.columns[0]}' instead."
         )
         sys.exit(1)
     df_bank = df_bank.set_index("ztf_object_id")
@@ -2442,16 +2441,16 @@ def re_build_indexed_sample(
     # Filtering dataset bank for provided features
     df_bank = df_bank[lc_features + host_features]
     df_bank = df_bank.dropna()
+
+    # Scale dataset bank features
     feat_arr = np.array(df_bank)
+    scaler = preprocessing.StandardScaler()
+    feat_arr_scaled = scaler.fit_transform(feat_arr)
     idx_arr = np.array(df_bank.index)
 
     # Apply PCA if necessary
     if use_pca:
         random_seed = 88
-        scaler = preprocessing.StandardScaler()
-
-        feat_arr_scaled = scaler.fit_transform(feat_arr)
-
         pcaModel = PCA(n_components=n_components, random_state=random_seed)
         feat_arr_scaled_pca = pcaModel.fit_transform(feat_arr_scaled)
 
@@ -2477,7 +2476,7 @@ def re_build_indexed_sample(
 
     # Create or load the ANNOY index:
     index_file = f"{index_stem_name_with_path}.ann"
-    index_dim = feat_arr_scaled_pca.shape[1] if use_pca else feat_arr.shape[1]
+    index_dim = feat_arr_scaled_pca.shape[1] if use_pca else feat_arr_scaled.shape[1]
 
     # If the ANNOY index already exists, use it
     if os.path.exists(index_file) and not force_recreation_of_index:
@@ -2495,7 +2494,7 @@ def re_build_indexed_sample(
 
         index = annoy.AnnoyIndex(index_dim, metric="manhattan")
         for i in range(len(idx_arr)):
-            index.add_item(i, feat_arr_scaled_pca[i] if use_pca else feat_arr[i])
+            index.add_item(i, feat_arr_scaled_pca[i] if use_pca else feat_arr_scaled[i])
 
         index.build(num_trees)
 
@@ -2509,9 +2508,23 @@ def re_build_indexed_sample(
 
 def re_get_timeseries_df(
     ztf_id,
+    theorized_lightcurve_df,
     path_to_timeseries_folder,
     path_to_sfd_data_folder,
 ):
+    if theorized_lightcurve_df is not None:
+        print("Extracting full lightcurve features for theorized lightcurve...")
+        timeseries_df = re_extract_lc_and_host_features(
+            ztf_id=ztf_id,
+            theorized_lightcurve_df=theorized_lightcurve_df,
+            path_to_timeseries_folder=path_to_timeseries_folder,
+            path_to_sfd_data_folder=path_to_sfd_data_folder,
+            show_lc=False,
+            show_host=True,
+            store_csv=False,
+        )
+        return timeseries_df
+
     # Check if timeseries already made
     print(f"Checking if timeseries dataframe for {ztf_id} already exists...")
     if os.path.exists(f"{path_to_timeseries_folder}/{ztf_id}_timeseries.csv"):
@@ -2527,17 +2540,19 @@ def re_get_timeseries_df(
         )
         timeseries_df = re_extract_lc_and_host_features(
             ztf_id=ztf_id,
+            theorized_lightcurve_df=theorized_lightcurve_df,
             path_to_timeseries_folder=path_to_timeseries_folder,
             path_to_sfd_data_folder=path_to_sfd_data_folder,
             show_lc=False,
             show_host=True,
-            store_csv=True,
+            store_csv=False,
         )
     return timeseries_df
 
 
 def re_LAISS_primer(
     lc_ztf_id,
+    theorized_lightcurve_df,
     dataset_bank_path,
     path_to_timeseries_folder,
     path_to_sfd_data_folder,
@@ -2547,12 +2562,26 @@ def re_LAISS_primer(
 ):
 
     feature_names = lc_features + host_features
+    if lc_ztf_id is not None and theorized_lightcurve_df is not None:
+        print(
+            "Expected only one of theorized_lightcurve_df and transient_ztf_id. Try again!"
+        )
+        raise ValueError(
+            "Cannot provide both a transient ZTF ID and a theorized lightcurve."
+        )
+    if theorized_lightcurve_df is not None and host_ztf_id is None:
+        print(
+            "Inputing theorized_lightcurve_df requires host_ztf_id_to_swap_in. Try again!"
+        )
+        raise ValueError(
+            "If providing a theorized lightcurve, must also provide a host galaxy ZTF ID."
+        )
 
     # Loop through lightcurve object and host object to create feature array
     for ztf_id, host_loop in [(lc_ztf_id, False), (host_ztf_id, True)]:
 
-        # Skip host loop if not swapping out host galaxy
-        if ztf_id is None:
+        # Skip host loop if host galaxy to swap is not provided
+        if host_loop and ztf_id is None:
             continue
 
         ztf_id_in_dataset_bank = False
@@ -2569,20 +2598,28 @@ def re_LAISS_primer(
                 return
             locus_feat_arr = df_bank.loc[ztf_id]
 
-            ztf_id_in_dataset_bank = True
             print(f"{ztf_id} is in dataset_bank.")
+            ztf_id_in_dataset_bank = True
 
-        # If ztf_if is not in dataset bank...
+        # If ztf_id is not in dataset bank...
         except:
             # Extract timeseries dataframe
-            print(f"{ztf_id} is not in dataset_bank.")
+            if ztf_id is not None:
+                print(f"{ztf_id} is not in dataset_bank.")
             timeseries_df = re_get_timeseries_df(
                 ztf_id=ztf_id,
+                theorized_lightcurve_df=(
+                    theorized_lightcurve_df if not host_loop else None
+                ),
                 path_to_timeseries_folder=path_to_timeseries_folder,
                 path_to_sfd_data_folder=path_to_sfd_data_folder,
             )
 
-            timeseries_df = timeseries_df[lc_features + host_features]
+            # If timeseries_df is from theorized lightcurve, it only has lightcurve features
+            if not host_loop and theorized_lightcurve_df is not None:
+                timeseries_df = timeseries_df[lc_features]
+            else:
+                timeseries_df = timeseries_df[lc_features + host_features]
             timeseries_df = timeseries_df.dropna()
 
             if timeseries_df.empty:
@@ -2590,18 +2627,26 @@ def re_LAISS_primer(
                 sys.exit(1)
 
             # Extract feature array from timeseries dataframe
+            if not host_loop and theorized_lightcurve_df is not None:
+                # theorized timeseries_df is just lightcurve data, so we must shape it properly
+                for host_feature in host_features:
+                    timeseries_df[host_feature] = np.nan
+
             locus_feat_arr_df = pd.DataFrame(timeseries_df.iloc[-1]).T
             locus_feat_arr = locus_feat_arr_df.iloc[0]
 
         # Pull TNS data for ztf_id
-        locus = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztf_id)
-        try:
-            tns = locus.catalog_objects["tns_public_objects"][0]
-            tns_name, tns_cls, tns_z = tns["name"], tns["type"], tns["redshift"]
-        except:
+        if ztf_id is not None:
+            locus = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztf_id)
+            try:
+                tns = locus.catalog_objects["tns_public_objects"][0]
+                tns_name, tns_cls, tns_z = tns["name"], tns["type"], tns["redshift"]
+            except:
+                tns_name, tns_cls, tns_z = "No TNS", "---", -99
+            if tns_cls == "":
+                tns_cls, tns_ann_z = "---", -99
+        else:
             tns_name, tns_cls, tns_z = "No TNS", "---", -99
-        if tns_cls == "":
-            tns_cls, tns_ann_z = "---", -99
 
         if host_loop:
             host_tns_name, host_tns_cls, host_tns_z = tns_name, tns_cls, tns_z
@@ -2644,6 +2689,7 @@ def re_LAISS_primer(
 
 def re_plot_lightcurves(
     primer_dict,
+    theorized_lightcurve_df,
     neighbor_ztfids,
     ann_locus_l,
     ann_dists,
@@ -2660,14 +2706,17 @@ def re_plot_lightcurves(
     else:
         primer_dict["lc_tns_z"] = primer_dict["lc_tns_z"]
 
-    ref_info = antares_client.search.get_by_ztf_object_id(
-        ztf_object_id=primer_dict["lc_ztf_id"]
-    )
-    try:
-        df_ref = ref_info.timeseries.to_pandas()
-    except:
-        print("No timeseries data...pass!")
-        pass
+    if primer_dict["lc_ztf_id"] is not None:
+        ref_info = antares_client.search.get_by_ztf_object_id(
+            ztf_object_id=primer_dict["lc_ztf_id"]
+        )
+        try:
+            df_ref = ref_info.timeseries.to_pandas()
+        except:
+            print("No timeseries data...pass!")
+            pass
+    else:
+        df_ref = theorized_lightcurve_df
 
     fig, ax = plt.subplots(figsize=(9.5, 6))
 
@@ -2684,7 +2733,7 @@ def re_plot_lightcurves(
         fmt="o",
         c="r",
         label=(
-            f"{primer_dict['lc_ztf_id']}"
+            f"{primer_dict['lc_ztf_id'] if primer_dict['lc_ztf_id'] is not None else 'Theorized LC'}"
             + (
                 f" w/ host from {primer_dict['host_ztf_id']},"
                 if primer_dict["host_ztf_id"] is not None
@@ -2808,6 +2857,7 @@ def re_plot_lightcurves(
 
 def re_LAISS_nearest_neighbors(
     primer_dict,
+    theorized_lightcurve_df,
     annoy_index_file_stem,
     use_pca=False,
     num_pca_components=15,
@@ -2824,28 +2874,22 @@ def re_LAISS_nearest_neighbors(
         print("Neighbor number must be a nonzero integer. Abort!")
         return
 
+    # Scale locus_feat_arr using the same scaler (fit on dataset bank feature array)
+    scaler = preprocessing.StandardScaler()
+    bank_feat_arr = np.load(
+        annoy_index_file_stem + "_feat_arr.npy",
+        allow_pickle=True,
+    )
+    trained_PCA_feat_arr_scaled = scaler.fit_transform(bank_feat_arr)
+    locus_feat_arr_scaled = scaler.transform([primer_dict["locus_feat_arr"]])
+
     if use_pca:
-        # 1. Scale locus_feat_arr using the same scaler (Standard Scaler)
-        scaler = preprocessing.StandardScaler()
-        trained_PCA_feat_arr = np.load(
-            annoy_index_file_stem + "_feat_arr.npy",
-            allow_pickle=True,
-        )
-
-        # scaler needs to be fit first to the same data as trained
-        trained_PCA_feat_arr_scaled = scaler.fit_transform(trained_PCA_feat_arr)
-
-        # scaler transform new data
-        locus_feat_arr_scaled = scaler.transform([primer_dict["locus_feat_arr"]])
-
-        # 2. Transform the scaled locus_feat_arr using the same PCA model
+        # Transform the scaled locus_feat_arr using the same PCA model
         random_seed = 88
         pca = PCA(n_components=num_pca_components, random_state=random_seed)
 
         # pca needs to be fit first to the same data as trained
         trained_PCA_feat_arr_scaled_pca = pca.fit_transform(trained_PCA_feat_arr_scaled)
-
-        # pca transform new data
         locus_feat_arr_pca = pca.transform(locus_feat_arr_scaled)
 
         print(
@@ -2858,7 +2902,7 @@ def re_LAISS_nearest_neighbors(
     else:
         print("Loading previously saved ANNOY index without PCA:", index_file)
         index_dim = len(primer_dict["locus_feat_arr"])
-        query_vector = primer_dict["locus_feat_arr"]
+        query_vector = locus_feat_arr_scaled[0]
 
     # 3. Use the ANNOY index to find nearest neighbors (common to both branches)
     index = annoy.AnnoyIndex(index_dim, metric="manhattan")
@@ -2969,11 +3013,15 @@ def re_LAISS_nearest_neighbors(
         ), tns_ann_zs.append(tns_ann_z)
 
     # Print the nearest neighbors and organize them for storage
-    print("\t\t\t\t\t\t ZTFID     IAU_NAME SPEC  Z")
+    if primer_dict["lc_ztf_id"]:
+        print(f"\t\t\t\t\t\t ZTFID     IAU_NAME SPEC  Z")
+    else:
+        print(f"\t\t\t\t\tIAU  SPEC  Z")
     print(
-        f"Input transient: https://alerce.online/object/{primer_dict['lc_ztf_id']} {primer_dict['lc_tns_name']} {primer_dict['lc_tns_cls']} {primer_dict['lc_tns_z']}"
+        f"Input transient: {'https://alerce.online/object/'+primer_dict['lc_ztf_id'] if primer_dict['lc_ztf_id'] else 'Theorized Lightcurve,'} {primer_dict['lc_tns_name']} {primer_dict['lc_tns_cls']} {primer_dict['lc_tns_z']}"
     )
     if primer_dict["host_ztf_id"] is not None:
+        print(f"\t\t\t\t\t\t\t\t\tZTFID     IAU_NAME SPEC  Z")
         print(
             f"Transient with host swapped into input: https://alerce.online/object/{primer_dict['host_ztf_id']} {primer_dict['host_tns_name']} {primer_dict['host_tns_cls']} {primer_dict['host_tns_z']}"
         )
@@ -2981,6 +3029,7 @@ def re_LAISS_nearest_neighbors(
     # Print lightcurves
     re_plot_lightcurves(
         primer_dict=primer_dict,
+        theorized_lightcurve_df=theorized_lightcurve_df,
         neighbor_ztfids=neighbor_ztfids,
         ann_locus_l=ann_locus_l,
         ann_dists=ann_dists,
@@ -3046,6 +3095,7 @@ def re_anomaly_detection(
 
     print("\nRunning AD Model...")
 
+    # TODO: Change this to account for laiss_dict["lc_ztf_id"] being None when using theorized lightcurve
     # Load the timeseries dataframe
     timeseries_df = re_get_timeseries_df(
         ztf_id=laiss_dict["lc_ztf_id"],
@@ -3066,6 +3116,8 @@ def re_anomaly_detection(
             timeseries_df[col] = host_values[col]
 
     timeseries_df_filt_feats = timeseries_df[lc_features + host_features]
+
+    # TODO: Change this to account for laiss_dict["lc_ztf_id"] being None when using theorized lightcurve
     input_lightcurve_locus = antares_client.search.get_by_ztf_object_id(
         ztf_object_id=laiss_dict["lc_ztf_id"]
     )
@@ -3087,10 +3139,11 @@ def re_anomaly_detection(
 
 
 def re_LAISS(
-    transient_ztf_id,  # transient on which to run laiss
     path_to_dataset_bank,
     path_to_timeseries_folder,
-    host_ztf_id_to_swap_in=None,  # will swap the host galaxy of the input transient to this transient's host
+    transient_ztf_id=None,  # transient on which to run laiss
+    theorized_lightcurve_df=None,  # optional, if provided will be used as a lightcurve instead of the transient_ztf_id
+    host_ztf_id_to_swap_in=None,  # will swap the host galaxy of the input transient/theorized lightcurve to this transient's host
     host_feature_names=[],  # Leave blank for lightcurve-only LAISS
     lc_feature_names=[],  # Leave blank for host-only LAISS
     path_to_sfd_data_folder="../data/sfddata-master",  # to correct extracted magnitudes for dust; not needed if transient_ztf_id in dataset bank
@@ -3098,7 +3151,6 @@ def re_LAISS(
     num_pca_components=20,  # Only matters if use_pca = True
     force_recreation_of_annoy_index=False,  # Rebuild indexed space for ANNOY even if it already exists
     index_folder_relative_path="../data/re_LAISS/index_files",  # folder to store ANNOY indices
-    path_to_ghost_database="../data/host_info",
     neighbors=10,  # will return this number of neighbors unless filtered by max_neighbor_distance
     suggest_neighbor_num=False,  # plot distances of neighbors to help choose optimal neighbor number
     max_neighbor_distance=None,  # optional, will return all neighbors below this distance (but no more than the 'neighbors' argument)
@@ -3123,15 +3175,10 @@ def re_LAISS(
         force_recreation_of_index=force_recreation_of_annoy_index,
     )
 
-    # set up GHOST file structure
-    host_path = path_to_ghost_database
-    if not os.path.exists(host_path):
-        os.makedirs(host_path)
-    os.environ["GHOST_PATH"] = host_path
-
     # run primer
     primer_dict = re_LAISS_primer(
         lc_ztf_id=transient_ztf_id,
+        theorized_lightcurve_df=theorized_lightcurve_df,
         host_ztf_id=host_ztf_id_to_swap_in,
         dataset_bank_path=path_to_dataset_bank,
         path_to_timeseries_folder=path_to_timeseries_folder,
@@ -3143,6 +3190,7 @@ def re_LAISS(
     # nearest neighbors search
     nearest_neighbors_df = re_LAISS_nearest_neighbors(
         primer_dict=primer_dict,
+        theorized_lightcurve_df=theorized_lightcurve_df,
         annoy_index_file_stem=index_stem_name_with_path,
         use_pca=use_pca,
         num_pca_components=num_pca_components,
@@ -3168,5 +3216,5 @@ def re_LAISS(
         )
 
     if return_neighbor_results:
-        return nearest_neighbors_df
+        return nearest_neighbors_df, primer_dict
     return

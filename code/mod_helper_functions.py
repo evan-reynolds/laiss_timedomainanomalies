@@ -1,6 +1,3 @@
-import astro_ghost
-from astro_ghost.ghostHelperFunctions import getGHOST
-
 import light_curve as lc
 import numpy as np
 import math
@@ -20,14 +17,35 @@ import matplotlib.pyplot as plt
 from sfdmap2 import sfdmap
 from dust_extinction.parameter_averages import G23
 import constants
-from sklearn.preprocessing import StandardScaler
 from scipy.stats import gamma, halfnorm, uniform
+from astropy.table import Table
+from astropy.table import MaskedColumn
 
-# from astro_prost.helpers import SnRateAbsmag
-# from astro_prost.associate import associate_sample
+from astro_prost.helpers import SnRateAbsmag
+from astro_prost.associate import associate_sample
 
 # GHOST getTransientHosts function with timeout
 from timeout_decorator import timeout, TimeoutError
+
+import sys
+import warnings
+from contextlib import contextmanager
+
+
+@contextmanager
+def re_suppress_output():
+    with open(os.devnull, "w") as devnull:
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        sys.stdout = devnull
+        sys.stderr = devnull
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                yield
+            finally:
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
 
 
 def getTnsData(ztf_id):
@@ -1012,8 +1030,13 @@ def re_getExtinctionCorrectedMag(
     return transient_row[band + "KronMag"] - A_filter
 
 
-def re_build_dataset_bank(raw_df_bank, av_in_raw_df_bank, path_to_sfd_folder=None):
-    # from constants.py
+def re_build_dataset_bank(
+    raw_df_bank,
+    av_in_raw_df_bank,
+    path_to_sfd_folder=None,
+    theorized=False,
+):
+
     raw_lc_features = constants.lc_features_const.copy()
     raw_host_features = constants.raw_host_features_const.copy()
 
@@ -1022,20 +1045,23 @@ def re_build_dataset_bank(raw_df_bank, av_in_raw_df_bank, path_to_sfd_folder=Non
             raw_host_features.append("A_V")
     else:
         for col in ["ra", "dec"]:
-            if col not in raw_lc_features:
-                raw_lc_features.append(col)
+            if col not in raw_host_features:
+                raw_host_features.append(col)
 
     # if "ztf_object_id" is the index, move it to the first column
     if raw_df_bank.index.name == "ztf_object_id":
         raw_df_bank = raw_df_bank.reset_index()
 
-    raw_features = ["ztf_object_id"] + raw_lc_features + raw_host_features
+    if theorized:
+        raw_features = raw_lc_features
+    else:
+        raw_features = ["ztf_object_id"] + raw_lc_features + raw_host_features
 
     # Check to make sure all required features are in the raw data
     missing_cols = [col for col in raw_features if col not in raw_df_bank.columns]
     if missing_cols:
         print(
-            f"KeyError: The following columns are not in the raw data provided: {missing_cols}. Abort!"
+            f"KeyError: The following columns for this transient are not in the raw data: {missing_cols}. Abort!"
         )
         return
 
@@ -1043,67 +1069,41 @@ def re_build_dataset_bank(raw_df_bank, av_in_raw_df_bank, path_to_sfd_folder=Non
         subset=raw_features
     )
 
-    # Create ell features
-    for band in ["g", "r", "i", "z"]:
-        xx = wip_dataset_bank[band + "momentXX"]
-        yy = wip_dataset_bank[band + "momentYY"]
-        xy = wip_dataset_bank[band + "momentXY"]
-        wip_dataset_bank[band + "ell"] = np.sqrt(
-            ((xx - yy) / (xx + yy)) ** 2 + (2 * xy / (xx + yy)) ** 2
+    if not theorized:
+        # Correct magnitude features for dust
+        for band in ["g", "r", "i", "z"]:
+            print(f"Engineering features for band {band}...")
+            wip_dataset_bank[band + "KronMagCorrected"] = wip_dataset_bank.apply(
+                lambda row: re_getExtinctionCorrectedMag(
+                    transient_row=row,
+                    band=band,
+                    av_in_raw_df_bank=av_in_raw_df_bank,
+                    path_to_sfd_folder=path_to_sfd_folder,
+                ),
+                axis=1,
+            )
+
+        # Create color features
+        wip_dataset_bank["gminusrKronMag"] = (
+            wip_dataset_bank["gKronMag"] - wip_dataset_bank["rKronMag"]
+        )
+        wip_dataset_bank["rminusiKronMag"] = (
+            wip_dataset_bank["rKronMag"] - wip_dataset_bank["iKronMag"]
+        )
+        wip_dataset_bank["iminuszKronMag"] = (
+            wip_dataset_bank["iKronMag"] - wip_dataset_bank["zKronMag"]
         )
 
-    # Correct magnitude features for dust
-    for band in ["g", "r", "i", "z"]:
-        print(f"Engineering features for band {band}...")
-        wip_dataset_bank[band + "KronMagCorrected"] = wip_dataset_bank.apply(
-            lambda row: re_getExtinctionCorrectedMag(
-                transient_row=row,
-                band=band,
-                av_in_raw_df_bank=av_in_raw_df_bank,
-                path_to_sfd_folder=path_to_sfd_folder,
-            ),
-            axis=1,
+        # Calculate color uncertainties
+        wip_dataset_bank["gminusrKronMagErr"] = np.sqrt(
+            wip_dataset_bank["gKronMagErr"] ** 2 + wip_dataset_bank["rKronMagErr"] ** 2
         )
-
-    # Create color features
-    wip_dataset_bank["gminusrKronMag"] = (
-        wip_dataset_bank["gKronMag"] - wip_dataset_bank["rKronMag"]
-    )
-    wip_dataset_bank["rminusiKronMag"] = (
-        wip_dataset_bank["rKronMag"] - wip_dataset_bank["iKronMag"]
-    )
-    wip_dataset_bank["iminuszKronMag"] = (
-        wip_dataset_bank["iKronMag"] - wip_dataset_bank["zKronMag"]
-    )
-
-    # Calculate color uncertainties
-    wip_dataset_bank["gminusrKronMagErr"] = np.sqrt(
-        wip_dataset_bank["gKronMagErr"] ** 2 + wip_dataset_bank["rKronMagErr"] ** 2
-    )
-    wip_dataset_bank["rminusiKronMagErr"] = np.sqrt(
-        wip_dataset_bank["rKronMagErr"] ** 2 + wip_dataset_bank["iKronMagErr"] ** 2
-    )
-    wip_dataset_bank["iminuszKronMagErr"] = np.sqrt(
-        wip_dataset_bank["iKronMagErr"] ** 2 + wip_dataset_bank["zKronMagErr"] ** 2
-    )
-
-    # color features down-weighting outliers
-    epsilon = 0.01
-    for feat in ["gminusrKronMag", "rminusiKronMag", "iminuszKronMag"]:
-        median = wip_dataset_bank[feat].median()
-        wip_dataset_bank[feat + "_mod"] = np.sqrt(
-            (wip_dataset_bank[feat] ** 2)
-            / ((wip_dataset_bank[feat] - median) ** 2 + epsilon)
+        wip_dataset_bank["rminusiKronMagErr"] = np.sqrt(
+            wip_dataset_bank["rKronMagErr"] ** 2 + wip_dataset_bank["iKronMagErr"] ** 2
         )
-
-    # standardize final LAISS features
-    final_features = (
-        constants.lc_features_const.copy() + constants.host_features_const.copy()
-    )
-    scaler = StandardScaler()
-    wip_dataset_bank[final_features] = scaler.fit_transform(
-        wip_dataset_bank[final_features]
-    )
+        wip_dataset_bank["iminuszKronMagErr"] = np.sqrt(
+            wip_dataset_bank["iKronMagErr"] ** 2 + wip_dataset_bank["zKronMagErr"] ** 2
+        )
 
     final_df_bank = wip_dataset_bank
 
@@ -1114,6 +1114,7 @@ def re_extract_lc_and_host_features(
     ztf_id,
     path_to_timeseries_folder,
     path_to_sfd_data_folder,
+    theorized_lightcurve_df=None,
     show_lc=False,
     show_host=True,
     store_csv=False,
@@ -1122,12 +1123,17 @@ def re_extract_lc_and_host_features(
     df_path = path_to_timeseries_folder
 
     # Look up transient
-    try:
-        ref_info = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztf_id)
-        df_ref = ref_info.timeseries.to_pandas()
-    except:
-        print("antares_client can't find this object. Skip! Continue...")
-        return
+    if theorized_lightcurve_df is not None:
+        df_ref = theorized_lightcurve_df
+        # Ensure correct capitalization of passbands ('g' and 'R')
+        df_ref["ant_passband"] = df_ref["ant_passband"].replace({"G": "g", "r": "R"})
+    else:
+        try:
+            ref_info = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztf_id)
+            df_ref = ref_info.timeseries.to_pandas()
+        except:
+            print("antares_client can't find this object. Skip! Continue...")
+            return
 
     # Check for observations
     df_ref_g = df_ref[(df_ref.ant_passband == "g") & (~df_ref.ant_mag.isna())]
@@ -1136,7 +1142,9 @@ def re_extract_lc_and_host_features(
         mjd_idx_at_min_mag_r_ref = df_ref_r[["ant_mag"]].reset_index().idxmin().ant_mag
         mjd_idx_at_min_mag_g_ref = df_ref_g[["ant_mag"]].reset_index().idxmin().ant_mag
     except:
-        print(f"No observations for {ztf_id}. pass!\n")
+        print(
+            f"No observations for {ztf_id if theorized_lightcurve_df is None else 'theorized lightcurve'}. Abort!\n"
+        )
         return
 
     # Plot lightcurve
@@ -1165,7 +1173,11 @@ def re_extract_lc_and_host_features(
     min_obs_count = 4
 
     # Pull lightcurve features
-    lightcurve = ref_info.lightcurve
+    if theorized_lightcurve_df is None:
+        lightcurve = df_ref[["ant_passband", "ant_mjd", "ant_mag", "ant_magerr"]]
+    else:
+        lightcurve = theorized_lightcurve_df
+
     feature_names, property_names, features_count = create_base_features_class(
         MAGN_EXTRACTOR, FLUX_EXTRACTOR
     )
@@ -1191,9 +1203,10 @@ def re_extract_lc_and_host_features(
             if len(detections) < min_obs_count:
                 continue
 
-            t = detections["ant_mjd"].values
-            m = detections["ant_mag"].values
-            merr = detections["ant_magerr"].values
+            t = detections["ant_mjd"].to_numpy(dtype=float)
+            m = detections["ant_mag"].to_numpy(dtype=float)
+            merr = detections["ant_magerr"].to_numpy(dtype=float)
+
             flux = np.power(10.0, -0.4 * m)
             fluxerr = (
                 0.5 * flux * (np.power(10.0, 0.4 * merr) - np.power(10.0, -0.4 * merr))
@@ -1214,85 +1227,111 @@ def re_extract_lc_and_host_features(
     lc_properties_d_l = [d for d in lc_properties_d_l if d]  # remove empty elements
     lc_properties_df = pd.DataFrame(lc_properties_d_l)
     if len(lc_properties_df) == 0:
-        print(f"Not enough observations for {ztf_id}. pass!\n")
+        print(
+            f"Not enough observations for {ztf_id if theorized_lightcurve_df is None else 'theorized lightcurve'}. Abort!\n"
+        )
         return
 
     end_time = time.time()
     print(
-        f"Extracted lightcurve features for for {ztf_id} in {(end_time - start_time):.2f}s!"
+        f"Extracted lightcurve features for {ztf_id if theorized_lightcurve_df is None else 'theorized lightcurve'} in {(end_time - start_time):.2f}s!"
     )
 
-    # Get GHOST features
-    ra, dec = np.mean(df_ref.ant_ra), np.mean(df_ref.ant_dec)
-    snName = [ztf_id, ztf_id]
-    snCoord = [
-        SkyCoord(ra * u.deg, dec * u.deg, frame="icrs"),
-        SkyCoord(ra * u.deg, dec * u.deg, frame="icrs"),
-    ]
-    with tempfile.TemporaryDirectory() as tmp:
-        try:
-            hosts = getTransientHosts_with_timeout(
-                transientName=snName,
-                transientCoord=snCoord,
-                GLADE=True,
-                verbose=0,
-                starcut="gentle",
-                ascentMatch=False,
-                savepath=tmp,
-                redo_search=False,
-            )
-        except:
-            print(f"GHOST error for {ztf_id}. Retry without GLADE. \n")
-            hosts = getTransientHosts_with_timeout(
-                transientName=snName,
-                transientCoord=snCoord,
-                GLADE=False,
-                verbose=0,
-                starcut="gentle",
-                ascentMatch=False,
-                savepath=tmp,
-                redo_search=False,
+    # Get PROST features
+    if theorized_lightcurve_df is None:
+        print("Searching for host galaxy...")
+        ra, dec = np.mean(df_ref.ant_ra), np.mean(df_ref.ant_dec)
+        snName = [ztf_id, ztf_id]
+        snCoord = [
+            SkyCoord(ra * u.deg, dec * u.deg, frame="icrs"),
+            SkyCoord(ra * u.deg, dec * u.deg, frame="icrs"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            # define priors for properties
+            priorfunc_offset = uniform(loc=0, scale=5)
+
+            likefunc_offset = gamma(a=0.75)
+
+            priors = {"offset": priorfunc_offset}
+            likes = {"offset": likefunc_offset}
+
+            transient_catalog = pd.DataFrame(
+                {"IAUID": [snName], "RA": [ra], "Dec": [dec]}
             )
 
-    if len(hosts) >= 1:
-        hosts_df = pd.DataFrame(hosts.loc[0]).T
-    else:
-        print(f"Cannot identify host galaxy for {ztf_id}. Abort!\n")
-        return
+            catalogs = ["panstarrs"]
+            transient_coord_cols = ("RA", "Dec")
+            transient_name_col = "IAUID"
+            verbose = 0
+            parallel = False
+            save = False
+            progress_bar = False
+            cat_cols = True
+            with re_suppress_output():
+                hosts = associate_sample(
+                    transient_catalog,
+                    coord_cols=transient_coord_cols,
+                    priors=priors,
+                    likes=likes,
+                    catalogs=catalogs,
+                    parallel=parallel,
+                    save=save,
+                    progress_bar=progress_bar,
+                    cat_cols=cat_cols,
+                    calc_host_props=False,
+                )
+            hosts.rename(
+                columns={"host_ra": "raMean", "host_dec": "decMean"}, inplace=True
+            )
 
-    # Check if required host features are missing
-    raw_host_feature_check = constants.raw_host_features_const.copy()
-    hosts_df = hosts[raw_host_feature_check]
-    hosts_df = hosts_df[~hosts_df.isnull().any(axis=1)]
-    if len(hosts_df) < 1:
-        # if any features are nan, we can't use as input
-        print(f"Some features are NaN for {ztf_id}. Skip!\n")
-        return
+            if len(hosts) >= 1:
+                hosts_df = pd.DataFrame(hosts.loc[0]).T
+            else:
+                print(f"Cannot identify host galaxy for {ztf_id}. Abort!\n")
+                return
 
-    if show_host:
-        print(
-            f"Host galaxy identified for {ztf_id}: http://ps1images.stsci.edu/cgi-bin/ps1cutouts?pos={hosts.raMean.values[0]}+{hosts.decMean.values[0]}&filter=color"
-        )
+            # Check if required host features are missing
+            try:
+                raw_host_feature_check = constants.raw_host_features_const.copy()
+                hosts_df = hosts[raw_host_feature_check]
+            except KeyError:
+                print(
+                    f"KeyError: The following columns are not in the identified host feature set. Try engineering: {[col for col in raw_host_feature_check if col not in hosts_df.columns]}.\nAbort!"
+                )
+                return
+            hosts_df = hosts_df[~hosts_df.isnull().any(axis=1)]
+            if len(hosts_df) < 1:
+                # if any features are nan, we can't use as input
+                print(f"Some features are NaN for {ztf_id}. Abort!\n")
+                return
 
-    hosts_df = pd.concat([hosts_df] * len(lc_properties_df), ignore_index=True)
+            if show_host:
+                print(
+                    f"Host galaxy identified for {ztf_id}: http://ps1images.stsci.edu/cgi-bin/ps1cutouts?pos={hosts.raMean.values[0]}+{hosts.decMean.values[0]}&filter=color"
+                )
 
-    lc_and_hosts_df = pd.concat([lc_properties_df, hosts_df], axis=1)
-    lc_and_hosts_df = lc_and_hosts_df.set_index("ztf_object_id")
-    lc_and_hosts_df["raMean"] = hosts.raMean.values[0]
-    lc_and_hosts_df["decMean"] = hosts.decMean.values[0]
-    if not os.path.exists(df_path):
-        print(f"Creating path {df_path}.")
-        os.makedirs(df_path)
+        hosts_df = pd.concat([hosts_df] * len(lc_properties_df), ignore_index=True)
 
-    # Lightcurve ra and dec may be needed in feature engineering
-    lc_and_hosts_df["ra"] = ra
-    lc_and_hosts_df["dec"] = dec
+        lc_and_hosts_df = pd.concat([lc_properties_df, hosts_df], axis=1)
+        lc_and_hosts_df = lc_and_hosts_df.set_index("ztf_object_id")
+        lc_and_hosts_df["raMean"] = hosts.raMean.values[0]
+        lc_and_hosts_df["decMean"] = hosts.decMean.values[0]
+        if not os.path.exists(df_path):
+            print(f"Creating path {df_path}.")
+            os.makedirs(df_path)
+
+        # Lightcurve ra and dec may be needed in feature engineering
+        lc_and_hosts_df["ra"] = ra
+        lc_and_hosts_df["dec"] = dec
 
     # Engineer necessary features
     lc_and_hosts_df_hydrated = re_build_dataset_bank(
-        raw_df_bank=lc_and_hosts_df,
+        raw_df_bank=(
+            lc_and_hosts_df if theorized_lightcurve_df is None else lc_properties_df
+        ),
         av_in_raw_df_bank=False,
         path_to_sfd_folder=path_to_sfd_data_folder,
+        theorized=True if theorized_lightcurve_df is not None else False,
     )
 
     if store_csv and not lc_and_hosts_df_hydrated.empty:

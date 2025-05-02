@@ -18,7 +18,27 @@ lc_features_const = [
     "feature_skew_magn_g",
     "feature_standard_deviation_magn_g",
     "feature_weighted_mean_magn_g",
-]
+]  # + [
+#     "g_peak_mag",
+#     "r_peak_mag",
+#     "g_peak_time",
+#     "g_rise_time",
+#     "g_decline_time",
+#     "g_duration_above_half_flux",
+#     "r_duration_above_half_flux",
+#     "r_peak_time",
+#     "r_rise_time",
+#     "r_decline_time",
+#     "mean_g-r",
+#     "g-r_at_g_peak",
+#     "mean_color_rate",
+#     "g_mean_rolling_variance",
+#     "r_mean_rolling_variance",
+#     "g_rise_local_curvature",
+#     "g_decline_local_curvature",
+#     "r_rise_local_curvature",
+#     "r_decline_local_curvature",
+# ]
 
 
 # Final host feature list for LAISS
@@ -38,13 +58,13 @@ host_features_const = [
     "gminusrKronMag",
     "rminusiKronMag",
     "iminuszKronMag",
+    "rmomentXX",
+    "rmomentXY",
+    "rmomentYY",
 ]
 
 # All features from dataset bank needed to engineer host features
 raw_host_features_const = [
-    "gmomentXX",
-    "gmomentYY",
-    "gmomentXY",
     "gKronMag",
     "gKronMagErr",
     "gKronRad",
@@ -56,16 +76,10 @@ raw_host_features_const = [
     "rKronMagErr",
     "rKronRad",
     "rExtNSigma",
-    "imomentXX",
-    "imomentYY",
-    "imomentXY",
     "iKronMag",
     "iKronMagErr",
     "iKronRad",
     "iExtNSigma",
-    "zmomentXX",
-    "zmomentYY",
-    "zmomentXY",
     "zKronMag",
     "zKronMagErr",
     "zKronRad",
@@ -73,7 +87,7 @@ raw_host_features_const = [
 ]
 
 
-# Original LAISS features for testing
+# # Replace with the below to use original LAISS features for testing
 # lc_features_const = [
 #     "feature_amplitude_magn_r",
 #     "feature_anderson_darling_normal_magn_r",
@@ -191,14 +205,14 @@ raw_host_features_const = [
 #     "yKronFlux",
 #     "yKronRad",
 #     "yExtNSigma",
-#     "i-z",
-#     "gApMag_gKronMag",
-#     "rApMag_rKronMag",
-#     "iApMag_iKronMag",
-#     "zApMag_zKronMag",
-#     "yApMag_yKronMag",
-#     "7DCD",
-#     "dist/DLR",
+#     # "i-z",
+#     # "gApMag_gKronMag",
+#     # "rApMag_rKronMag",
+#     # "iApMag_iKronMag",
+#     # "zApMag_zKronMag",
+#     # "yApMag_yKronMag",
+#     # "7DCD",
+#     # "dist/DLR",
 # ] + [
 #     "gKronMag",
 #     "gKronMagErr",
@@ -261,12 +275,12 @@ raw_host_features_const = [
 #     "yKronFlux",
 #     "yKronRad",
 #     "yExtNSigma",
-#     "i-z",
-#     "gApMag_gKronMag",
-#     "rApMag_rKronMag",
-#     "iApMag_iKronMag",
-#     "zApMag_zKronMag",
-#     "yApMag_yKronMag",
-#     "7DCD",
-#     "dist/DLR",
+#     # "i-z",
+#     # "gApMag_gKronMag",
+#     # "rApMag_rKronMag",
+#     # "iApMag_iKronMag",
+#     # "zApMag_zKronMag",
+#     # "yApMag_yKronMag",
+#     # "7DCD",
+#     # "dist/DLR",
 # ]
