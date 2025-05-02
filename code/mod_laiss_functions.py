@@ -2412,6 +2412,7 @@ def re_build_indexed_sample(
     index_folder_relative_path="",
     save=True,
     force_recreation_of_index=False,
+    upweight_lc_feats_factor=1,
 ):
     df_bank = pd.read_csv(dataset_bank_path)
 
@@ -2444,12 +2445,20 @@ def re_build_indexed_sample(
 
     # Scale dataset bank features
     feat_arr = np.array(df_bank)
+    idx_arr = np.array(df_bank.index)
     scaler = preprocessing.StandardScaler()
     feat_arr_scaled = scaler.fit_transform(feat_arr)
-    idx_arr = np.array(df_bank.index)
 
-    # Apply PCA if necessary
+    if not use_pca:
+        # Upweight lightcurve features
+        num_lc_feats = len(lc_features)
+        feat_arr_scaled[:, :num_lc_feats] *= upweight_lc_feats_factor
+
     if use_pca:
+        if upweight_lc_feats_factor != 1:
+            print(
+                "Ignoring upweighted lightcurve feature factor. Not compatible with PCA."
+            )
         random_seed = 88
         pcaModel = PCA(n_components=n_components, random_state=random_seed)
         feat_arr_scaled_pca = pcaModel.fit_transform(feat_arr_scaled)
@@ -2865,6 +2874,7 @@ def re_LAISS_nearest_neighbors(
     suggest_neighbor_num=False,
     max_neighbor_dist=None,
     search_k=1000,
+    upweight_lc_feats_factor=1,
     return_results=False,
 ):
     start_time = time.time()
@@ -2882,6 +2892,11 @@ def re_LAISS_nearest_neighbors(
     )
     trained_PCA_feat_arr_scaled = scaler.fit_transform(bank_feat_arr)
     locus_feat_arr_scaled = scaler.transform([primer_dict["locus_feat_arr"]])
+
+    if not use_pca:
+        # Upweight lightcurve features
+        num_lc_feats = len(constants.lc_features_const.copy())
+        locus_feat_arr_scaled[:, :num_lc_feats] *= upweight_lc_feats_factor
 
     if use_pca:
         # Transform the scaled locus_feat_arr using the same PCA model
@@ -3155,6 +3170,7 @@ def re_LAISS(
     suggest_neighbor_num=False,  # plot distances of neighbors to help choose optimal neighbor number
     max_neighbor_distance=None,  # optional, will return all neighbors below this distance (but no more than the 'neighbors' argument)
     search_k=5000,  # for ANNOY search
+    upweight_lc_feats_factor=1,  # Makes lightcurve features a larger contributor to distance
     return_neighbor_results=True,  # returns a list of neighbor dictionaries
     run_AD=True,  # run anomaly detection
     n_estimators=100,  # anomaly detection parameter
@@ -3173,6 +3189,7 @@ def re_LAISS(
         index_folder_relative_path=index_folder_relative_path,
         save=True,
         force_recreation_of_index=force_recreation_of_annoy_index,
+        upweight_lc_feats_factor=upweight_lc_feats_factor,
     )
 
     # run primer
@@ -3198,6 +3215,7 @@ def re_LAISS(
         suggest_neighbor_num=suggest_neighbor_num,
         max_neighbor_dist=max_neighbor_distance,
         search_k=search_k,
+        upweight_lc_feats_factor=upweight_lc_feats_factor,
         return_results=return_neighbor_results,
     )
 
