@@ -124,3 +124,7 @@ data/re_LAISS/index_files/re_laiss_annoy_index_pcaFalse_19lc_0host.ann
 data/re_LAISS/index_files/re_laiss_annoy_index_pcaFalse_19lc_0host_idx_arr.npy
 data/re_LAISS/index_files/re_laiss_annoy_index_pcaFalse_19lc_0host_feat_arr.npy
 data/small_df_bank_re_laiss_old_lc_feats.csv
+code/__pycache__/lightcurve_engineer.cpython-39.pyc
+code/__pycache__/relaiss_lc_feature_extractor.cpython-39.pyc
+data/old_data/for_comparing_lc_feats_df_bank.csv
+timeseries/ZTF18aaizerg_timeseries.csv

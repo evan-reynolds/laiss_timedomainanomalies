@@ -1,26 +1,4 @@
 # Final lightcurve feature list for LAISS
-# lc_features_const = [
-#     "feature_amplitude_magn_r",
-#     "feature_anderson_darling_normal_magn_r",
-#     "feature_beyond_2_std_magn_r",
-#     "feature_cusum_magn_r",
-#     "feature_kurtosis_magn_r",
-#     "feature_median_absolute_deviation_magn_r",
-#     "feature_skew_magn_r",
-#     "feature_standard_deviation_magn_r",
-#     "feature_weighted_mean_magn_r",
-#     "feature_amplitude_magn_g",
-#     "feature_anderson_darling_normal_magn_g",
-#     "feature_beyond_2_std_magn_g",
-#     "feature_cusum_magn_g",
-#     "feature_kurtosis_magn_g",
-#     "feature_median_absolute_deviation_magn_g",
-#     "feature_skew_magn_g",
-#     "feature_standard_deviation_magn_g",
-#     "feature_weighted_mean_magn_g",
-# ]
-
-# Alex's lightcurve feature list
 lc_features_const = [
     "g_peak_mag",
     "r_peak_mag",
@@ -42,7 +20,6 @@ lc_features_const = [
     "r_rise_local_curvature",
     "r_decline_local_curvature",
 ]
-
 
 # Final host feature list for LAISS
 host_features_const = [
@@ -89,8 +66,30 @@ raw_host_features_const = [
     "zExtNSigma",
 ]
 
+# v2 lightcurve feature list for LAISS
+# lc_features_const = [
+#     "feature_amplitude_magn_r",
+#     "feature_anderson_darling_normal_magn_r",
+#     "feature_beyond_2_std_magn_r",
+#     "feature_cusum_magn_r",
+#     "feature_kurtosis_magn_r",
+#     "feature_median_absolute_deviation_magn_r",
+#     "feature_skew_magn_r",
+#     "feature_standard_deviation_magn_r",
+#     "feature_weighted_mean_magn_r",
+#     "feature_amplitude_magn_g",
+#     "feature_anderson_darling_normal_magn_g",
+#     "feature_beyond_2_std_magn_g",
+#     "feature_cusum_magn_g",
+#     "feature_kurtosis_magn_g",
+#     "feature_median_absolute_deviation_magn_g",
+#     "feature_skew_magn_g",
+#     "feature_standard_deviation_magn_g",
+#     "feature_weighted_mean_magn_g",
+# ]
 
-# # Replace with the below to use original LAISS features for testing
+
+# Replace with the below to use original LAISS features for testing (need to switch out dataset bank too)
 # lc_features_const = [
 #     "feature_amplitude_magn_r",
 #     "feature_anderson_darling_normal_magn_r",

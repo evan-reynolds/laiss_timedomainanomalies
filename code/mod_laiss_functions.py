@@ -2520,6 +2520,7 @@ def re_get_timeseries_df(
     theorized_lightcurve_df,
     path_to_timeseries_folder,
     path_to_sfd_data_folder,
+    path_to_dataset_bank=None,
 ):
     if theorized_lightcurve_df is not None:
         print("Extracting full lightcurve features for theorized lightcurve...")
@@ -2528,6 +2529,7 @@ def re_get_timeseries_df(
             theorized_lightcurve_df=theorized_lightcurve_df,
             path_to_timeseries_folder=path_to_timeseries_folder,
             path_to_sfd_data_folder=path_to_sfd_data_folder,
+            path_to_dataset_bank=path_to_dataset_bank,
             show_lc=False,
             show_host=True,
             store_csv=False,
@@ -2552,9 +2554,10 @@ def re_get_timeseries_df(
             theorized_lightcurve_df=theorized_lightcurve_df,
             path_to_timeseries_folder=path_to_timeseries_folder,
             path_to_sfd_data_folder=path_to_sfd_data_folder,
+            path_to_dataset_bank=path_to_dataset_bank,
             show_lc=False,
             show_host=True,
-            store_csv=False,
+            store_csv=True,
         )
     return timeseries_df
 
@@ -2622,6 +2625,7 @@ def re_LAISS_primer(
                 ),
                 path_to_timeseries_folder=path_to_timeseries_folder,
                 path_to_sfd_data_folder=path_to_sfd_data_folder,
+                path_to_dataset_bank=dataset_bank_path,
             )
 
             # If timeseries_df is from theorized lightcurve, it only has lightcurve features
@@ -3093,6 +3097,7 @@ def re_anomaly_detection(
     max_depth,
     random_state,
     max_features,
+    path_to_dataset_bank=None,
 ):
     # Load the model
     figure_path = f"../models/cls=binary_n_estimators={n_estimators}_max_depth={max_depth}_rs={random_state}_max_feats={max_features}_cw=balanced/figures"
@@ -3116,6 +3121,7 @@ def re_anomaly_detection(
         ztf_id=laiss_dict["lc_ztf_id"],
         path_to_timeseries_folder=path_to_timeseries_folder,
         path_to_sfd_data_folder=path_to_sfd_data_folder,
+        path_to_dataset_bank=path_to_dataset_bank,
     )
 
     if laiss_dict["host_ztf_id"] is not None:
@@ -3124,6 +3130,7 @@ def re_anomaly_detection(
             ztf_id=laiss_dict["host_ztf_id"],
             path_to_timeseries_folder=path_to_timeseries_folder,
             path_to_sfd_data_folder=path_to_sfd_data_folder,
+            path_to_dataset_bank=path_to_dataset_bank,
         )
 
         host_values = swapped_host_timeseries_df[host_features].iloc[0]
@@ -3227,6 +3234,7 @@ def re_LAISS(
             host_features=host_feature_names,
             path_to_timeseries_folder=path_to_timeseries_folder,
             path_to_sfd_data_folder=path_to_sfd_data_folder,
+            path_to_dataset_bank=path_to_dataset_bank,
             n_estimators=n_estimators,
             max_depth=max_depth,
             random_state=random_state,
