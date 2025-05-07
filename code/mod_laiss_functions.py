@@ -2557,7 +2557,7 @@ def re_get_timeseries_df(
             path_to_dataset_bank=path_to_dataset_bank,
             show_lc=False,
             show_host=True,
-            store_csv=True,
+            store_csv=False,
         )
     return timeseries_df
 
@@ -2571,6 +2571,7 @@ def re_LAISS_primer(
     host_ztf_id=None,
     lc_features=[],
     host_features=[],
+    num_sims=10,
 ):
 
     feature_names = lc_features + host_features
@@ -2630,11 +2631,11 @@ def re_LAISS_primer(
 
             # If timeseries_df is from theorized lightcurve, it only has lightcurve features
             if not host_loop and theorized_lightcurve_df is not None:
-                timeseries_df = timeseries_df[lc_features]
+                subset_feats_for_checking_na = lc_features
             else:
-                timeseries_df = timeseries_df[lc_features + host_features]
-            timeseries_df = timeseries_df.dropna()
+                subset_feats_for_checking_na = lc_features + host_features
 
+            timeseries_df = timeseries_df.dropna(subset=subset_feats_for_checking_na)
             if timeseries_df.empty:
                 print(f"{ztf_id} has some NaN features. Abort!")
                 sys.exit(1)
@@ -2671,14 +2672,44 @@ def re_LAISS_primer(
             lc_locus_feat_arr = locus_feat_arr
 
     # Make final feature array
+    lc_feature_err_names = constants.lc_feature_err.copy()
+    host_feature_err_names = constants.host_feature_err.copy()
+    feature_err_names = lc_feature_err_names + host_feature_err_names
+
     if host_ztf_id is None:
         # Not swapping out host, use features from lightcurve ztf_id
-        locus_feat_arr = lc_locus_feat_arr[feature_names].values
+        locus_feat_df = lc_locus_feat_arr[feature_names + feature_err_names]
     else:
         # Create new feature array with mixed lc and host features
-        subset_lc_features = lc_locus_feat_arr[lc_features]
-        subset_host_features = host_locus_feat_arr[host_features]
-        locus_feat_arr = np.concatenate((subset_lc_features, subset_host_features))
+        subset_lc_features = lc_locus_feat_arr[lc_features + lc_feature_err_names]
+        subset_host_features = host_locus_feat_arr[
+            host_features + host_feature_err_names
+        ]
+
+        locus_feat_df = pd.concat([subset_lc_features, subset_host_features], axis=0)
+
+    # Create Monte Carlo copies locus_feat_arrays_l
+    np.random.seed(888)
+    err_lookup = constants.err_lookup.copy()
+    locus_feat_arrs_mc_l = []
+    for _ in range(num_sims):
+        locus_feat_df_for_mc = locus_feat_df.copy()
+
+        for feat_name, error_name in err_lookup.items():
+            if feat_name in feature_names:
+                std = locus_feat_df_for_mc[error_name]
+                noise = np.random.normal(0, std)
+                if not np.isnan(noise):
+                    locus_feat_df_for_mc[feat_name] = (
+                        locus_feat_df_for_mc[feat_name] + noise
+                    )
+                else:
+                    pass
+
+        locus_feat_arrs_mc_l.append(locus_feat_df_for_mc[feature_names].values)
+
+    # Create true feature array
+    locus_feat_arr = locus_feat_df[feature_names].values
 
     output_dict = {
         # host data is optional, it's only if the user decides to swap in a new host
@@ -2695,6 +2726,7 @@ def re_LAISS_primer(
         "lc_tns_z": lc_tns_z,
         "lc_ztf_id_in_dataset_bank": lc_ztf_id_in_dataset_bank,
         "locus_feat_arr": locus_feat_arr,
+        "locus_feat_arrs_mc_l": locus_feat_arrs_mc_l,
     }
 
     return output_dict
@@ -2888,52 +2920,91 @@ def re_LAISS_nearest_neighbors(
         print("Neighbor number must be a nonzero integer. Abort!")
         return
 
-    # Scale locus_feat_arr using the same scaler (fit on dataset bank feature array)
+    # Find neighbors for every Monte Carlo feature array
     scaler = preprocessing.StandardScaler()
+    if use_pca:
+        print(
+            f"Loading previously saved ANNOY PCA={num_pca_components} index:",
+            index_file,
+        )
+    else:
+        print("Loading previously saved ANNOY index without PCA:", index_file)
+
     bank_feat_arr = np.load(
         annoy_index_file_stem + "_feat_arr.npy",
         allow_pickle=True,
     )
     trained_PCA_feat_arr_scaled = scaler.fit_transform(bank_feat_arr)
-    locus_feat_arr_scaled = scaler.transform([primer_dict["locus_feat_arr"]])
 
-    if not use_pca:
-        # Upweight lightcurve features
-        num_lc_feats = len(constants.lc_features_const.copy())
-        locus_feat_arr_scaled[:, :num_lc_feats] *= upweight_lc_feats_factor
+    true_and_mc_feat_arrs_l = [primer_dict["locus_feat_arr"]] + primer_dict[
+        "locus_feat_arrs_mc_l"
+    ]
 
-    if use_pca:
-        # Transform the scaled locus_feat_arr using the same PCA model
-        random_seed = 88
-        pca = PCA(n_components=num_pca_components, random_state=random_seed)
+    neighbor_dist_dict = {}
+    if len(primer_dict["locus_feat_arrs_mc_l"]) != 0:
+        print("Running Monte Carlo simulation to find possible neighbors...")
+    for locus_feat_arr in true_and_mc_feat_arrs_l:
+        # Scale locus_feat_arr using the same scaler (fit on dataset bank feature array)
+        locus_feat_arr_scaled = scaler.transform([locus_feat_arr])
 
-        # pca needs to be fit first to the same data as trained
-        trained_PCA_feat_arr_scaled_pca = pca.fit_transform(trained_PCA_feat_arr_scaled)
-        locus_feat_arr_pca = pca.transform(locus_feat_arr_scaled)
+        if not use_pca:
+            # Upweight lightcurve features
+            num_lc_feats = len(constants.lc_features_const.copy())
+            locus_feat_arr_scaled[:, :num_lc_feats] *= upweight_lc_feats_factor
 
-        print(
-            f"Loading previously saved ANNOY PCA={num_pca_components} index:",
-            index_file,
+        if use_pca:
+            # Transform the scaled locus_feat_arr using the same PCA model
+            random_seed = 88
+            pca = PCA(n_components=num_pca_components, random_state=random_seed)
+
+            # pca needs to be fit first to the same data as trained
+            trained_PCA_feat_arr_scaled_pca = pca.fit_transform(
+                trained_PCA_feat_arr_scaled
+            )
+            locus_feat_arr_pca = pca.transform(locus_feat_arr_scaled)
+
+            index_dim = num_pca_components
+            query_vector = locus_feat_arr_pca[0]
+
+        else:
+            index_dim = len(locus_feat_arr)
+            query_vector = locus_feat_arr_scaled[0]
+
+        # 3. Use the ANNOY index to find nearest neighbors (common to both branches)
+        index = annoy.AnnoyIndex(index_dim, metric="manhattan")
+        index.load(index_file)
+        idx_arr = np.load(f"{annoy_index_file_stem}_idx_arr.npy", allow_pickle=True)
+
+        ann_start_time = time.time()
+        ann_indexes, ann_dists = index.get_nns_by_vector(
+            query_vector, n=n, search_k=search_k, include_distances=True
         )
-        index_dim = num_pca_components
-        query_vector = locus_feat_arr_pca[0]
 
-    else:
-        print("Loading previously saved ANNOY index without PCA:", index_file)
-        index_dim = len(primer_dict["locus_feat_arr"])
-        query_vector = locus_feat_arr_scaled[0]
+        # Store neighbors and distances in dictionary
+        for ann_index, ann_dist in zip(ann_indexes, ann_dists):
+            if ann_index in neighbor_dist_dict:
+                neighbor_dist_dict[ann_index].append(ann_dist)
+            else:
+                neighbor_dist_dict[ann_index] = [ann_dist]
 
-    # 3. Use the ANNOY index to find nearest neighbors (common to both branches)
-    index = annoy.AnnoyIndex(index_dim, metric="manhattan")
-    index.load(index_file)
-    idx_arr = np.load(f"{annoy_index_file_stem}_idx_arr.npy", allow_pickle=True)
-
-    ann_start_time = time.time()
-    ann_indexes, ann_dists = index.get_nns_by_vector(
-        query_vector, n=n, search_k=search_k, include_distances=True
+    print(
+        "Number of unique neighbors found through Monte Carlo:", len(neighbor_dist_dict)
     )
 
-    if round(ann_dists[0]) == 0:
+    # Pick n neighbors with lowest median distance
+    if len(primer_dict["locus_feat_arrs_mc_l"]) != 0:
+        print(f"Picking top {n} neighbors.")
+    medians = {
+        idx: 0 if 0 in np.round(dists, 1) else np.median(dists)
+        for idx, dists in neighbor_dist_dict.items()
+    }
+    sorted_neighbors = sorted(medians.items(), key=lambda item: item[1])
+    top_n_neighbors = sorted_neighbors[:n]
+
+    ann_indexes = [idx for idx, _ in top_n_neighbors]
+    ann_dists = [dist for _, dist in top_n_neighbors]
+
+    if ann_dists[0] == 0:
         print(
             "First neighbor is input transient, so it will be excluded. The final neighbor count will be one less than expected."
         )
@@ -3045,7 +3116,7 @@ def re_LAISS_nearest_neighbors(
             f"Transient with host swapped into input: https://alerce.online/object/{primer_dict['host_ztf_id']} {primer_dict['host_tns_name']} {primer_dict['host_tns_cls']} {primer_dict['host_tns_z']}"
         )
 
-    # Print lightcurves
+    # Plot lightcurves
     re_plot_lightcurves(
         primer_dict=primer_dict,
         theorized_lightcurve_df=theorized_lightcurve_df,
@@ -3174,10 +3245,11 @@ def re_LAISS(
     force_recreation_of_annoy_index=False,  # Rebuild indexed space for ANNOY even if it already exists
     index_folder_relative_path="../data/re_LAISS/index_files",  # folder to store ANNOY indices
     neighbors=10,  # will return this number of neighbors unless filtered by max_neighbor_distance
+    num_mc_simulations=0,  # set to 0 to turn off simulation. If not using pca, set to 20. Not reccomended for use with pca.
     suggest_neighbor_num=False,  # plot distances of neighbors to help choose optimal neighbor number
     max_neighbor_distance=None,  # optional, will return all neighbors below this distance (but no more than the 'neighbors' argument)
     search_k=5000,  # for ANNOY search
-    upweight_lc_feats_factor=1,  # Makes lightcurve features a larger contributor to distance
+    upweight_lc_feats_factor=1,  # Makes lightcurve features a larger contributor to distance. Setting to 1 does nothing.
     return_neighbor_results=True,  # returns a list of neighbor dictionaries
     run_AD=True,  # run anomaly detection
     n_estimators=100,  # anomaly detection parameter
@@ -3209,6 +3281,7 @@ def re_LAISS(
         path_to_sfd_data_folder=path_to_sfd_data_folder,
         lc_features=lc_feature_names,
         host_features=host_feature_names,
+        num_sims=num_mc_simulations,
     )
 
     # nearest neighbors search
