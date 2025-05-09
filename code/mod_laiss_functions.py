@@ -11,6 +11,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from kneed import KneeLocator
 import pickle
+from sklearn.pipeline import Pipeline
+from pyod.models.iforest import IForest
 
 
 def mod_build_indexed_sample(
@@ -2523,6 +2525,7 @@ def re_get_timeseries_df(
     save_timeseries=False,
     path_to_dataset_bank=None,
     building_for_AD=False,
+    swapped_host=False,
 ):
     if theorized_lightcurve_df is not None:
         print("Extracting full lightcurve features for theorized lightcurve...")
@@ -2535,6 +2538,7 @@ def re_get_timeseries_df(
             show_lc=False,
             show_host=True,
             store_csv=save_timeseries,
+            swapped_host=swapped_host,
         )
         return timeseries_df
 
@@ -2563,6 +2567,7 @@ def re_get_timeseries_df(
             show_host=True,
             store_csv=save_timeseries,
             building_for_AD=building_for_AD,
+            swapped_host=swapped_host,
         )
     return timeseries_df
 
@@ -2633,6 +2638,7 @@ def re_LAISS_primer(
                     path_to_sfd_data_folder=path_to_sfd_data_folder,
                     path_to_dataset_bank=dataset_bank_path,
                     save_timeseries=save_timeseries,
+                    swapped_host=host_loop,
                 )
 
         # If ztf_id is not in dataset bank...
@@ -2649,6 +2655,7 @@ def re_LAISS_primer(
                 path_to_sfd_data_folder=path_to_sfd_data_folder,
                 path_to_dataset_bank=dataset_bank_path,
                 save_timeseries=save_timeseries,
+                swapped_host=host_loop,
             )
 
             # If timeseries_df is from theorized lightcurve, it only has lightcurve features
@@ -2673,14 +2680,7 @@ def re_LAISS_primer(
 
         # Pull TNS data for ztf_id
         if ztf_id is not None:
-            locus = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztf_id)
-            try:
-                tns = locus.catalog_objects["tns_public_objects"][0]
-                tns_name, tns_cls, tns_z = tns["name"], tns["type"], tns["redshift"]
-            except:
-                tns_name, tns_cls, tns_z = "No TNS", "---", -99
-            if tns_cls == "":
-                tns_cls, tns_ann_z = "---", -99
+            tns_name, tns_cls, tns_z = re_getTnsData(ztf_id)
         else:
             tns_name, tns_cls, tns_z = "No TNS", "---", -99
 
@@ -3107,22 +3107,15 @@ def re_LAISS_nearest_neighbors(
     ann_locus_l = []
     for i in ann_indexes:
         neighbor_ztfids.append(idx_arr[i])
+
         ann_locus = antares_client.search.get_by_ztf_object_id(ztf_object_id=idx_arr[i])
         ann_locus_l.append(ann_locus)
-        try:
-            ann_tns = ann_locus.catalog_objects["tns_public_objects"][0]
-            tns_ann_name, tns_ann_cls, tns_ann_z = (
-                ann_tns["name"],
-                ann_tns["type"],
-                ann_tns["redshift"],
-            )
-        except:
-            tns_ann_name, tns_ann_cls, tns_ann_z = "No TNS", "---", -99
-        if tns_ann_cls == "":
-            tns_ann_cls, tns_ann_z = "---", -99
-        tns_ann_names.append(tns_ann_name), tns_ann_classes.append(
-            tns_ann_cls
-        ), tns_ann_zs.append(tns_ann_z)
+
+        tns_ann_name, tns_ann_cls, tns_ann_z = re_getTnsData(idx_arr[i])
+
+        tns_ann_names.append(tns_ann_name)
+        tns_ann_classes.append(tns_ann_cls)
+        tns_ann_zs.append(tns_ann_z)
 
     # Print the nearest neighbors and organize them for storage
     if primer_dict["lc_ztf_id"]:
@@ -3178,33 +3171,102 @@ def re_LAISS_nearest_neighbors(
     return pd.DataFrame(storage)
 
 
+def re_train_AD_model(
+    lc_features,
+    host_features,
+    path_to_dataset_bank,
+    path_to_models_directory="../models",
+    n_estimators=500,
+    contamination=0.02,
+    max_samples=1024,
+    force_retrain=False,
+):
+    feature_names = lc_features + host_features
+    df_bank_path = path_to_dataset_bank
+    model_dir = path_to_models_directory
+    model_name = f"IForest_n{n_estimators}_c{contamination}_ms{max_samples}_lc{len(lc_features)}_host{len(host_features)}.pkl"
+
+    os.makedirs(model_dir, exist_ok=True)
+
+    print("Checking if AD model exists...")
+
+    # If model already exists, don't retrain
+    if os.path.exists(os.path.join(model_dir, model_name)) and not force_retrain:
+        print("Model already exists →", os.path.join(model_dir, model_name))
+        return os.path.join(model_dir, model_name)
+
+    print("AD model does not exist. Training and saving new model.")
+
+    # Train model
+    df = pd.read_csv(df_bank_path, low_memory=False)
+    X = df[feature_names].values
+
+    pipeline = Pipeline(
+        steps=[
+            ("scaler", StandardScaler(with_mean=True, with_std=True)),
+            (
+                "clf",
+                IForest(
+                    n_estimators=n_estimators,
+                    contamination=contamination,
+                    max_samples=max_samples,
+                    behaviour="new",
+                    random_state=42,
+                ),
+            ),
+        ]
+    )
+    pipeline.fit(X)
+
+    # Save model
+    with open(os.path.join(model_dir, model_name), "wb") as f:
+        pickle.dump(pipeline, f)
+
+    print(
+        "Isolation Forest model trained and saved →",
+        os.path.join(model_dir, model_name),
+    )
+
+    return os.path.join(model_dir, model_name)
+
+
 def re_anomaly_detection(
-    laiss_dict,
+    transient_ztf_id,
     lc_features,
     host_features,
     path_to_timeseries_folder,
     path_to_sfd_data_folder,
-    path_to_dataset_bank=None,
+    path_to_dataset_bank,
+    host_ztf_id_to_swap_in=None,
+    path_to_models_directory="../models",
+    path_to_figure_directory="../models/figures",
+    n_estimators=500,
+    contamination=0.02,
+    max_samples=1024,
+    force_retrain=False,
 ):
+    print("Running Anomaly Detection:\n")
 
-    figure_path = "../models/figures"
-    model_path = "../models"
+    # Train the model (if necessary)
+    path_to_trained_model = re_train_AD_model(
+        lc_features,
+        host_features,
+        path_to_dataset_bank,
+        path_to_models_directory=path_to_models_directory,
+        n_estimators=n_estimators,
+        contamination=contamination,
+        max_samples=max_samples,
+        force_retrain=force_retrain,
+    )
 
-    os.makedirs(figure_path, exist_ok=True)
-    os.makedirs(model_path, exist_ok=True)
-
-    with open(
-        f"{model_path}/IForest_n500_c0.02_ms1024.pkl",
-        "rb",
-    ) as f:
-        clf = pickle.load(f)  # `clf` is actually the Pipeline
-
-    print("Running AD Model:\n")
+    # Load the model
+    with open(path_to_trained_model, "rb") as f:
+        clf = pickle.load(f)
 
     # Load the timeseries dataframe
-    print("Rebuilding timeseries dataframes for AD...")
+    print("\nRebuilding timeseries dataframe(s) for AD...")
     timeseries_df = re_get_timeseries_df(
-        ztf_id=laiss_dict["lc_ztf_id"],
+        ztf_id=transient_ztf_id,
         theorized_lightcurve_df=None,
         path_to_timeseries_folder=path_to_timeseries_folder,
         path_to_sfd_data_folder=path_to_sfd_data_folder,
@@ -3213,16 +3275,17 @@ def re_anomaly_detection(
         building_for_AD=True,
     )
 
-    if laiss_dict["host_ztf_id"] is not None:
+    if host_ztf_id_to_swap_in is not None:
         # Swap in the host galaxy
         swapped_host_timeseries_df = re_get_timeseries_df(
-            ztf_id=laiss_dict["host_ztf_id"],
+            ztf_id=host_ztf_id_to_swap_in,
             theorized_lightcurve_df=None,
             path_to_timeseries_folder=path_to_timeseries_folder,
             path_to_sfd_data_folder=path_to_sfd_data_folder,
             path_to_dataset_bank=path_to_dataset_bank,
             save_timeseries=False,
             building_for_AD=True,
+            swapped_host=True,
         )
 
         host_values = swapped_host_timeseries_df[host_features].iloc[0]
@@ -3230,25 +3293,24 @@ def re_anomaly_detection(
             timeseries_df[col] = host_values[col]
 
     timeseries_df_filt_feats = timeseries_df[lc_features + host_features]
-
     input_lightcurve_locus = antares_client.search.get_by_ztf_object_id(
-        ztf_object_id=laiss_dict["lc_ztf_id"]
+        ztf_object_id=transient_ztf_id
     )
 
-    print("\nChecking for anomalies and plotting...")
+    tns_name, tns_cls, tns_z = re_getTnsData(transient_ztf_id)
 
     re_check_anom_and_plot(
         clf=clf,
-        input_ztf_id=laiss_dict["lc_ztf_id"],
-        swapped_host_ztf_id=laiss_dict["host_ztf_id"],
-        input_spec_cls=laiss_dict["lc_tns_cls"],
-        input_spec_z=laiss_dict["lc_tns_z"],
+        input_ztf_id=transient_ztf_id,
+        swapped_host_ztf_id=host_ztf_id_to_swap_in,
+        input_spec_cls=tns_cls,
+        input_spec_z=tns_z,
         anom_thresh=50,
         timeseries_df_full=timeseries_df,
         timeseries_df_features_only=timeseries_df_filt_feats,
         ref_info=input_lightcurve_locus,
         savefig=True,
-        figure_path=figure_path,
+        figure_path=path_to_figure_directory,
     )
     return
 
@@ -3275,38 +3337,43 @@ def re_LAISS(
     upweight_lc_feats_factor=1,  # Makes lightcurve features a larger contributor to distance. Setting to 1 does nothing.
     run_AD=True,  # run anomaly detection
     run_NN=True,
+    path_to_models_directory="../models",
+    path_to_figure_directory="../figures",
+    n_estimators=500,
+    contamination=0.02,
+    max_samples=1024,
+    force_AD_retrain=False,
 ):
-    # build ANNOY indexed sample from dataset bank
-    index_stem_name_with_path = re_build_indexed_sample(
-        dataset_bank_path=path_to_dataset_bank,
-        lc_features=lc_feature_names,
-        host_features=host_feature_names,
-        use_pca=use_pca,
-        n_components=num_pca_components,
-        num_trees=1000,
-        index_folder_relative_path=index_folder_relative_path,
-        save=True,
-        force_recreation_of_index=force_recreation_of_annoy_index,
-        upweight_lc_feats_factor=upweight_lc_feats_factor,
-    )
 
-    # run primer
-    primer_dict = re_LAISS_primer(
-        lc_ztf_id=transient_ztf_id,
-        theorized_lightcurve_df=theorized_lightcurve_df,
-        host_ztf_id=host_ztf_id_to_swap_in,
-        dataset_bank_path=path_to_dataset_bank,
-        path_to_timeseries_folder=path_to_timeseries_folder,
-        path_to_sfd_data_folder=path_to_sfd_data_folder,
-        lc_features=lc_feature_names,
-        host_features=host_feature_names,
-        num_sims=num_mc_simulations,
-        save_timeseries=save_timeseries,
-    )
+    if run_NN or suggest_neighbor_num:
+        # build ANNOY indexed sample from dataset bank
+        index_stem_name_with_path = re_build_indexed_sample(
+            dataset_bank_path=path_to_dataset_bank,
+            lc_features=lc_feature_names,
+            host_features=host_feature_names,
+            use_pca=use_pca,
+            n_components=num_pca_components,
+            num_trees=1000,
+            index_folder_relative_path=index_folder_relative_path,
+            save=True,
+            force_recreation_of_index=force_recreation_of_annoy_index,
+            upweight_lc_feats_factor=upweight_lc_feats_factor,
+        )
 
-    # nearest neighbors search
-    nearest_neighbors_df = None
-    if run_NN:
+        # run primer
+        primer_dict = re_LAISS_primer(
+            lc_ztf_id=transient_ztf_id,
+            theorized_lightcurve_df=theorized_lightcurve_df,
+            host_ztf_id=host_ztf_id_to_swap_in,
+            dataset_bank_path=path_to_dataset_bank,
+            path_to_timeseries_folder=path_to_timeseries_folder,
+            path_to_sfd_data_folder=path_to_sfd_data_folder,
+            lc_features=lc_feature_names,
+            host_features=host_feature_names,
+            num_sims=num_mc_simulations,
+            save_timeseries=save_timeseries,
+        )
+
         nearest_neighbors_df = re_LAISS_nearest_neighbors(
             primer_dict=primer_dict,
             theorized_lightcurve_df=theorized_lightcurve_df,
@@ -3320,23 +3387,27 @@ def re_LAISS(
             upweight_lc_feats_factor=upweight_lc_feats_factor,
         )
 
-        # Nearest neighbors returns None if suggesting neighbor output
-        if nearest_neighbors_df is None:
-            return None, None
-
-    # annomaly detection
     if run_AD:
         if theorized_lightcurve_df is not None:
-            print("Cannot run anomaly detection on theorized lightcurve. Skipping AD.")
-            return nearest_neighbors_df, primer_dict
+            print("Cannot run anomaly detection on theorized lightcurve. Skipping.")
+        else:
+            re_anomaly_detection(
+                transient_ztf_id=transient_ztf_id,
+                host_ztf_id_to_swap_in=host_ztf_id_to_swap_in,
+                lc_features=lc_feature_names,
+                host_features=host_feature_names,
+                path_to_timeseries_folder=path_to_timeseries_folder,
+                path_to_sfd_data_folder=path_to_sfd_data_folder,
+                path_to_dataset_bank=path_to_dataset_bank,
+                path_to_models_directory=path_to_models_directory,
+                path_to_figure_directory=path_to_figure_directory,
+                n_estimators=n_estimators,
+                contamination=contamination,
+                max_samples=max_samples,
+                force_retrain=force_AD_retrain,
+            )
 
-        re_anomaly_detection(
-            laiss_dict=primer_dict,
-            lc_features=lc_feature_names,
-            host_features=host_feature_names,
-            path_to_timeseries_folder=path_to_timeseries_folder,
-            path_to_sfd_data_folder=path_to_sfd_data_folder,
-            path_to_dataset_bank=path_to_dataset_bank,
-        )
+    if run_NN or suggest_neighbor_num:
+        return nearest_neighbors_df, primer_dict
 
-    return nearest_neighbors_df, primer_dict
+    return

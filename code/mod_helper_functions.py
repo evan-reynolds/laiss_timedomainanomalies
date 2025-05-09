@@ -51,18 +51,6 @@ def re_suppress_output():
                 sys.stderr = old_stderr
 
 
-def getTnsData(ztf_id):
-    locus = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztf_id)
-    try:
-        tns = locus.catalog_objects["tns_public_objects"][0]
-        tns_name, tns_cls, tns_z = tns["name"], tns["type"], tns["redshift"]
-    except:
-        tns_name, tns_cls, tns_z = "No TNS", "---", -99
-    if tns_cls == "":
-        tns_cls, tns_ann_z = "---", -99
-    return tns_name, tns_cls, tns_z
-
-
 def mod_extract_lc_and_host_features(
     ztf_id_ref,
     use_lc_for_ann_only_bool,
@@ -1010,6 +998,18 @@ def host_pdfs(
         print(f"PDF saved at: {pdf_path}")
 
 
+def re_getTnsData(ztf_id):
+    locus = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztf_id)
+    try:
+        tns = locus.catalog_objects["tns_public_objects"][0]
+        tns_name, tns_cls, tns_z = tns["name"], tns["type"], tns["redshift"]
+    except:
+        tns_name, tns_cls, tns_z = "No TNS", "---", -99
+    if tns_cls == "":
+        tns_cls, tns_ann_z = "---", -99
+    return tns_name, tns_cls, tns_z
+
+
 def re_getExtinctionCorrectedMag(
     transient_row,
     band,
@@ -1182,6 +1182,7 @@ def re_extract_lc_and_host_features(
     show_host=True,
     store_csv=False,
     building_for_AD=False,
+    swapped_host=False,
 ):
     start_time = time.time()
     df_path = path_to_timeseries_folder
@@ -1196,8 +1197,8 @@ def re_extract_lc_and_host_features(
             ref_info = antares_client.search.get_by_ztf_object_id(ztf_object_id=ztf_id)
             df_ref = ref_info.timeseries.to_pandas()
         except:
-            print("antares_client can't find this object. Skip! Continue...")
-            return
+            print("antares_client can't find this object. Abort!")
+            raise ValueError(f"antares_client can't find object {ztf_id}.")
 
     # Check for observations
     df_ref_g = df_ref[(df_ref.ant_passband == "g") & (~df_ref.ant_mag.isna())]
@@ -1248,7 +1249,10 @@ def re_extract_lc_and_host_features(
         return
 
     # Engineer features in time
-    lc_timeseries_feat_df = pd.DataFrame()
+    lc_col_names = constants.lc_features_const.copy()
+    lc_timeseries_feat_df = pd.DataFrame(
+        columns=["ztf_object_id"] + ["obs_num"] + ["mjd_cutoff"] + lc_col_names
+    )
     for i in range(min_obs_count, len(lightcurve) + 1):
 
         lightcurve_subset = lightcurve.iloc[:i]
@@ -1301,6 +1305,15 @@ def re_extract_lc_and_host_features(
                 )
 
     end_time = time.time()
+
+    if lc_timeseries_feat_df.empty and not swapped_host:
+        print(
+            f"Failed to extract features for {ztf_id if theorized_lightcurve_df is None else 'theorized lightcurve'}. Abort!"
+        )
+        raise ValueError(
+            f"Failed to extract features for {ztf_id if theorized_lightcurve_df is None else 'theorized lightcurve'}"
+        )
+
     print(
         f"Extracted lightcurve features for {ztf_id if theorized_lightcurve_df is None else 'theorized lightcurve'} in {(end_time - start_time):.2f}s!"
     )
@@ -1381,8 +1394,16 @@ def re_extract_lc_and_host_features(
                 else:
                     print("Host identified.")
 
-        hosts_df = pd.concat([hosts_df] * len(lc_timeseries_feat_df), ignore_index=True)
-        lc_and_hosts_df = pd.concat([lc_timeseries_feat_df, hosts_df], axis=1)
+        if not lc_timeseries_feat_df.empty:
+            hosts_df = pd.concat(
+                [hosts_df] * len(lc_timeseries_feat_df), ignore_index=True
+            )
+            lc_and_hosts_df = pd.concat([lc_timeseries_feat_df, hosts_df], axis=1)
+        else:
+            lc_timeseries_feat_df.loc[0, "ztf_object_id"] = (
+                ztf_id if theorized_lightcurve_df is None else "theorized_lightcurve"
+            )
+            lc_and_hosts_df = pd.concat([lc_timeseries_feat_df, hosts_df], axis=1)
 
         lc_and_hosts_df = lc_and_hosts_df.set_index("ztf_object_id")
 
@@ -1393,13 +1414,13 @@ def re_extract_lc_and_host_features(
             print(f"Creating path {df_path}.")
             os.makedirs(df_path)
 
-        # Lightcurve ra and dec may be needed in feature engineering
+        # ra and dec may be needed in feature engineering
         lc_and_hosts_df["ra"] = ra
         lc_and_hosts_df["dec"] = dec
 
-    # Engineer additonal features in build_dataset_bank function (mainly host features)
+    # Engineer additonal features in build_dataset_bank function
     if building_for_AD:
-        print("\nEngineering features...")
+        print("Engineering features...")
     lc_and_hosts_df_hydrated = re_build_dataset_bank(
         raw_df_bank=(
             lc_and_hosts_df
@@ -1413,7 +1434,7 @@ def re_extract_lc_and_host_features(
         building_for_AD=building_for_AD,
     )
     if building_for_AD:
-        print("Finished engineering features.")
+        print("Finished engineering features.\n")
 
     if store_csv and not lc_and_hosts_df_hydrated.empty:
         if theorized_lightcurve_df is None:
@@ -1456,6 +1477,7 @@ def re_check_anom_and_plot(
     except:
         print(
             f"Prediction doesn't exceed anom_threshold of {anom_thresh}% for {input_ztf_id}."
+            + (f" with host from {swapped_host_ztf_id}" if swapped_host_ztf_id else "")
         )
         anom_idx_is = False
 
@@ -1575,8 +1597,13 @@ def re_check_anom_and_plot(
     ax2.grid(True)
 
     if savefig:
+        os.makedirs(figure_path, exist_ok=True)
         plt.savefig(
-            f"{figure_path}/{input_ztf_id}_AD_run_timeseries.pdf",
+            (
+                f"{figure_path}/{input_ztf_id}"
+                + (f"_w_host_{swapped_host_ztf_id}" if swapped_host_ztf_id else "")
+                + "_AD.pdf"
+            ),
             dpi=300,
             bbox_inches="tight",
         )

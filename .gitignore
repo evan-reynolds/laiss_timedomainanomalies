@@ -169,3 +169,9 @@ models/figures/ZTF21aaublej_AD_run_timeseries.pdf
 timeseries/ZTF17aaazdba_timeseries.csv
 timeseries/ZTF18abqlpgq_timeseries.csv
 timeseries/ZTF18acaqdaa_timeseries.csv
+figures/ZTF18acbwenp_AD.pdf
+figures/ZTF18acbwenp_w_host_ZTF21aaublej.png
+figures/ZTF21aaublej_AD.pdf
+models/IForest_n500_c0.02_ms1024_lc0_host18.pkl
+models/IForest_n500_c0.02_ms1024_lc19_host0.pkl
+models/IForest_n500_c0.02_ms1024_lc19_host18.pkl

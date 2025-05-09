@@ -1,4 +1,4 @@
-# Final lightcurve feature list for LAISS. You can comment out features.
+# Lightcurve feature list for LAISS. You can comment out features.
 lc_features_const = [
     "g_peak_mag",
     "r_peak_mag",
@@ -21,7 +21,7 @@ lc_features_const = [
     "r_decline_local_curvature",
 ]
 
-# Final host feature list for LAISS. You can comment out features.
+# Host feature list for LAISS. You can comment out features.
 host_features_const = [
     "gKronMagCorrected",
     "gKronRad",
@@ -43,7 +43,8 @@ host_features_const = [
     "rmomentYY",
 ]
 
-# DO NOT CHANGE. Feature errors
+############# DO NOT CHANGE CONSTANTS BELOW THIS LINE #############
+
 lc_feature_err = [
     "g_peak_mag_err",
     "r_peak_mag_err",
@@ -76,7 +77,6 @@ host_feature_err = [
 ]
 
 
-# DO NOT CHANGE.
 err_lookup = {
     # Lightcurve feature error names
     "g_peak_mag": "g_peak_mag_err",
@@ -108,7 +108,7 @@ err_lookup = {
 }
 
 
-# DO NOT CHANGE. All features from dataset bank needed to engineer host features
+# All features from dataset bank needed to engineer host features
 raw_host_features_const = [
     "gKronMag",
     "gKronMagErr",
