@@ -132,9 +132,10 @@ class SupernovaFeatureExtractor:
 
         # Recalculate t0 based on filtered times
         if len(self.g["time"]) == 0 or len(self.r["time"]) == 0:
-            print(
-                f"[Warning] No data left in g or r band after filtering for object: {self.ZTFID}. Skipping."
-            )
+            pass
+            # print(
+            #     f"Warning: No data left in g or r band after filtering for object: {self.ZTFID}. Skipping."
+            # )
         else:
             new_time_offset = min(self.g["time"].min(), self.r["time"].min())
 
@@ -225,7 +226,7 @@ class SupernovaFeatureExtractor:
 
     def _color_features(self):
         if len(self.g["time"]) < 2 or len(self.r["time"]) < 2:
-            print("Warning: Not enough data in g or r band to compute color features.")
+            # print("Warning: Not enough data in g or r band to compute color features.")
             return None
 
         def dedup(t, m):
@@ -255,7 +256,7 @@ class SupernovaFeatureExtractor:
                 tpg, r_time, r_mag
             )
         except Exception as e:
-            print(f"Warning: Could not compute g-r at g-band peak due to: {e}")
+            # print(f"Warning: Could not compute g-r at g-band peak due to: {e}")
             gr_at_gpeak = np.nan
         return np.mean(color), gr_at_gpeak, mean_rate
 
@@ -330,9 +331,9 @@ class SupernovaFeatureExtractor:
 
     def extract_features(self, return_uncertainty=False, n_trials=20):
         if len(self.g["time"]) == 0 or len(self.r["time"]) == 0:
-            print(
-                f"[Warning] No data left in g or r band after filtering for object: {self.ZTFID}. Skipping."
-            )
+            # print(
+            #     f"Warning: No data left in g or r band after filtering for object: {self.ZTFID}. Skipping."
+            # )
             return None
 
         g_core = self._core_stats(self.g)
@@ -347,7 +348,7 @@ class SupernovaFeatureExtractor:
         r_rise_curv, r_decline_curv = self._local_curvature_features(self.r)
 
         if color_feats is None:
-            print("Warning: Color features could not be computed. Defaulting to NaN.")
+            # print("Warning: Color features could not be computed. Defaulting to NaN.")
             color_feats = (np.nan, np.nan, np.nan)
         g_peak_struct = self._peak_structure(self.g)
         r_peak_struct = self._peak_structure(self.r)

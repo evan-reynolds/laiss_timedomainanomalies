@@ -22,6 +22,7 @@ from astropy.table import Table
 from astropy.table import MaskedColumn
 from lightcurve_engineer import *
 from sklearn.impute import KNNImputer
+from sklearn.impute import SimpleImputer
 
 from astro_prost.helpers import SnRateAbsmag
 from astro_prost.associate import associate_sample
@@ -1039,6 +1040,7 @@ def re_build_dataset_bank(
     theorized=False,
     path_to_dataset_bank=None,
     building_entire_df_bank=False,
+    building_for_AD=False,
 ):
 
     raw_lc_features = constants.lc_features_const.copy()
@@ -1071,50 +1073,68 @@ def re_build_dataset_bank(
         )
         return
 
-    # Eliminate poor feature values
-    wip_dataset_bank = raw_df_bank.replace([np.inf, -np.inf, -999], np.nan).dropna(
+    # Impute missing features
+    test_dataset_bank = raw_df_bank.replace([np.inf, -np.inf, -999], np.nan).dropna(
         subset=raw_features
     )
-    if wip_dataset_bank.empty:
+
+    nan_cols = [
+        col
+        for col in raw_features
+        if raw_df_bank[col].replace([np.inf, -np.inf, -999], np.nan).isna().all()
+    ]
+
+    if not building_for_AD:
         print(
-            "Some features required for extraction are NA. Attempting feature imputation."
+            f"There are {len(raw_df_bank) - len(test_dataset_bank)} of {len(raw_df_bank)} rows in the timeseries dataframe with 1 or more NA features."
         )
-
-        # Impute missing values
-        wip_dataset_bank = raw_df_bank
-
-        if building_entire_df_bank:
-            X = raw_df_bank[raw_feats_no_ztf]
-
-            feat_imputer = KNNImputer(weights="distance").fit(X)
-            imputed_filt_arr = feat_imputer.transform(X)
-        else:
-            true_raw_df_bank = pd.read_csv(path_to_dataset_bank)
-            X = true_raw_df_bank[raw_feats_no_ztf]
-
-            feat_imputer = KNNImputer(weights="distance").fit(X)
-
-            imputed_filt_arr = feat_imputer.transform(
-                wip_dataset_bank[raw_feats_no_ztf]
+        if len(nan_cols) != 0:
+            print(
+                f"The following {len(nan_cols)} feature(s) are NaN for all measurements: {nan_cols}."
             )
+        print("Imputing features (if necessary)...")
 
-        imputed_filt_df = pd.DataFrame(imputed_filt_arr, columns=raw_feats_no_ztf)
-        imputed_filt_df.index = raw_df_bank.index
+    wip_dataset_bank = raw_df_bank
 
-        wip_dataset_bank[raw_feats_no_ztf] = imputed_filt_df
+    if building_entire_df_bank:
+        X = raw_df_bank[raw_feats_no_ztf]
 
-        wip_dataset_bank = wip_dataset_bank.replace(
-            [np.inf, -np.inf, -999], np.nan
-        ).dropna(subset=raw_features)
+        feat_imputer = KNNImputer(weights="distance").fit(X)
+        imputed_filt_arr = feat_imputer.transform(X)
+    else:
+        true_raw_df_bank = pd.read_csv(path_to_dataset_bank)
+        X = true_raw_df_bank[raw_feats_no_ztf]
+
+        if building_for_AD:
+            # Use mean imputation
+            feat_imputer = SimpleImputer(strategy="mean").fit(X)
+        else:
+            # Use KNN imputation
+            feat_imputer = KNNImputer(weights="distance").fit(X)
+
+        imputed_filt_arr = feat_imputer.transform(wip_dataset_bank[raw_feats_no_ztf])
+
+    imputed_filt_df = pd.DataFrame(imputed_filt_arr, columns=raw_feats_no_ztf)
+    imputed_filt_df.index = raw_df_bank.index
+
+    wip_dataset_bank[raw_feats_no_ztf] = imputed_filt_df
+
+    wip_dataset_bank = wip_dataset_bank.replace([np.inf, -np.inf, -999], np.nan).dropna(
+        subset=raw_features
+    )
+
+    if not building_for_AD:
         if not wip_dataset_bank.empty:
             print("Successfully imputed features.")
         else:
             print("Failed to impute features.")
 
+    # Engineer the remaining features
     if not theorized:
         # Correct host magnitude features for dust
         for band in ["g", "r", "i", "z"]:
-            print(f"Engineering features for band {band}...")
+            if not building_for_AD:
+                print(f"Engineering features for band {band}...")
             wip_dataset_bank[band + "KronMagCorrected"] = wip_dataset_bank.apply(
                 lambda row: re_getExtinctionCorrectedMag(
                     transient_row=row,
@@ -1161,6 +1181,7 @@ def re_extract_lc_and_host_features(
     show_lc=False,
     show_host=True,
     store_csv=False,
+    building_for_AD=False,
 ):
     start_time = time.time()
     df_path = path_to_timeseries_folder
@@ -1212,96 +1233,72 @@ def re_extract_lc_and_host_features(
         )
         plt.show()
 
-    # Minimuim number of observations to use lightcurve
-    min_obs_count = 4
-
-    # Pull lightcurve features:
+    # Pull required lightcurve features:
     if theorized_lightcurve_df is None:
         lightcurve = df_ref[["ant_passband", "ant_mjd", "ant_mag", "ant_magerr"]]
     else:
         lightcurve = theorized_lightcurve_df
 
-    # Engineer lightcurve features
-    df_g = lightcurve[lightcurve["ant_passband"] == "g"]
-    time_g = df_g["ant_mjd"].tolist()
-    mag_g = df_g["ant_mag"].tolist()
-    err_g = df_g["ant_magerr"].tolist()
-
-    df_r = lightcurve[lightcurve["ant_passband"] == "R"]
-    time_r = df_r["ant_mjd"].tolist()
-    mag_r = df_r["ant_mag"].tolist()
-    err_r = df_r["ant_magerr"].tolist()
-
-    extractor = SupernovaFeatureExtractor(
-        time_g=time_g,
-        mag_g=mag_g,
-        err_g=err_g,
-        time_r=time_r,
-        mag_r=mag_r,
-        err_r=err_r,
-        ZTFID=ztf_id,
-    )
-    engineered_lc_properties_df = extractor.extract_features(return_uncertainty=True)
-
-    # Get timeseries lightcurve features using lightcurve package
-    feature_names, property_names, features_count = create_base_features_class(
-        MAGN_EXTRACTOR, FLUX_EXTRACTOR
-    )
-
-    g_obs = list(get_detections(lightcurve, "g").ant_mjd.values)
-    r_obs = list(get_detections(lightcurve, "R").ant_mjd.values)
-    mjd_l = sorted(g_obs + r_obs)
-
-    lc_properties_d_l = []  # using as list of dictionaries
-
-    band_lc = lightcurve[(~lightcurve["ant_mag"].isna())]
-    idx = ~MaskedColumn(band_lc["ant_mag"]).mask
-    all_detections = remove_simultaneous_alerts(band_lc[idx])
-
-    for ob, mjd in enumerate(mjd_l):  # requires 4 observations
-        # do time evolution of detections - in chunks
-        detections_pb = all_detections[all_detections["ant_mjd"].values <= mjd]
-        lc_properties_d = {}
-        for band, names in property_names.items():
-            detections = detections_pb[detections_pb["ant_passband"] == band]
-
-            # Ensure locus has enough (>3) obs for calculation
-            if len(detections) < min_obs_count:
-                continue
-
-            t = detections["ant_mjd"].to_numpy(dtype=float)
-            m = detections["ant_mag"].to_numpy(dtype=float)
-            merr = detections["ant_magerr"].to_numpy(dtype=float)
-
-            flux = np.power(10.0, -0.4 * m)
-            fluxerr = (
-                0.5 * flux * (np.power(10.0, 0.4 * merr) - np.power(10.0, -0.4 * merr))
-            )
-
-            magn_features = MAGN_EXTRACTOR(t, m, merr, fill_value=None)
-            flux_features = FLUX_EXTRACTOR(t, flux, fluxerr, fill_value=None)
-
-            # After successfully calculating features, set locus properties and tag
-            lc_properties_d["obs_num"] = int(ob)
-            lc_properties_d["mjd_cutoff"] = mjd
-            lc_properties_d["ztf_object_id"] = ztf_id
-            for name, value in zip(names, chain(magn_features, flux_features)):
-                lc_properties_d[name] = value
-
-        lc_properties_d_l.append(lc_properties_d)  # Storing dictionary
-
-    lc_properties_d_l = [d for d in lc_properties_d_l if d]  # remove empty elements
-    lc_properties_df = pd.DataFrame(lc_properties_d_l)
-
-    # Add engineered lightcurve features
-    features_dict = engineered_lc_properties_df.iloc[0].to_dict()
-    lc_properties_df = lc_properties_df.assign(**features_dict)
-
-    if len(lc_properties_df) == 0:
+    lightcurve = lightcurve.sort_values(by="ant_mjd").reset_index(drop=True).dropna()
+    min_obs_count = 5
+    if len(lightcurve) < min_obs_count:
         print(
             f"Not enough observations for {ztf_id if theorized_lightcurve_df is None else 'theorized lightcurve'}. Abort!\n"
         )
         return
+
+    # Engineer features in time
+    lc_timeseries_feat_df = pd.DataFrame()
+    for i in range(min_obs_count, len(lightcurve) + 1):
+
+        lightcurve_subset = lightcurve.iloc[:i]
+        time_mjd = lightcurve_subset["ant_mjd"].iloc[-1]
+
+        # Engineer lightcurve features
+        df_g = lightcurve_subset[lightcurve_subset["ant_passband"] == "g"]
+        time_g = df_g["ant_mjd"].tolist()
+        mag_g = df_g["ant_mag"].tolist()
+        err_g = df_g["ant_magerr"].tolist()
+
+        df_r = lightcurve_subset[lightcurve_subset["ant_passband"] == "R"]
+        time_r = df_r["ant_mjd"].tolist()
+        mag_r = df_r["ant_mag"].tolist()
+        err_r = df_r["ant_magerr"].tolist()
+
+        try:
+            extractor = SupernovaFeatureExtractor(
+                time_g=time_g,
+                mag_g=mag_g,
+                err_g=err_g,
+                time_r=time_r,
+                mag_r=mag_r,
+                err_r=err_r,
+                ZTFID=ztf_id,
+            )
+
+            engineered_lc_properties_df = extractor.extract_features(
+                return_uncertainty=True
+            )
+        except:
+            continue
+
+        if engineered_lc_properties_df is not None:
+
+            engineered_lc_properties_df.insert(0, "mjd_cutoff", time_mjd)
+            engineered_lc_properties_df.insert(0, "obs_num", int(i))
+            engineered_lc_properties_df.insert(
+                0,
+                "ztf_object_id",
+                ztf_id if theorized_lightcurve_df is None else "theorized_lightcurve",
+            )
+
+            if lc_timeseries_feat_df.empty:
+                lc_timeseries_feat_df = engineered_lc_properties_df
+            else:
+                lc_timeseries_feat_df = pd.concat(
+                    [lc_timeseries_feat_df, engineered_lc_properties_df],
+                    ignore_index=True,
+                )
 
     end_time = time.time()
     print(
@@ -1377,12 +1374,15 @@ def re_extract_lc_and_host_features(
                 return
 
             if show_host:
-                print(
-                    f"Host galaxy identified for {ztf_id}: http://ps1images.stsci.edu/cgi-bin/ps1cutouts?pos={hosts.raMean.values[0]}+{hosts.decMean.values[0]}&filter=color"
-                )
+                if not building_for_AD:
+                    print(
+                        f"Host galaxy identified for {ztf_id}: http://ps1images.stsci.edu/cgi-bin/ps1cutouts?pos={hosts.raMean.values[0]}+{hosts.decMean.values[0]}&filter=color"
+                    )
+                else:
+                    print("Host identified.")
 
-        hosts_df = pd.concat([hosts_df] * len(lc_properties_df), ignore_index=True)
-        lc_and_hosts_df = pd.concat([lc_properties_df, hosts_df], axis=1)
+        hosts_df = pd.concat([hosts_df] * len(lc_timeseries_feat_df), ignore_index=True)
+        lc_and_hosts_df = pd.concat([lc_timeseries_feat_df, hosts_df], axis=1)
 
         lc_and_hosts_df = lc_and_hosts_df.set_index("ztf_object_id")
 
@@ -1398,24 +1398,35 @@ def re_extract_lc_and_host_features(
         lc_and_hosts_df["dec"] = dec
 
     # Engineer additonal features in build_dataset_bank function (mainly host features)
+    if building_for_AD:
+        print("\nEngineering features...")
     lc_and_hosts_df_hydrated = re_build_dataset_bank(
         raw_df_bank=(
-            lc_and_hosts_df if theorized_lightcurve_df is None else lc_properties_df
+            lc_and_hosts_df
+            if theorized_lightcurve_df is None
+            else lc_timeseries_feat_df
         ),
         av_in_raw_df_bank=False,
         path_to_sfd_folder=path_to_sfd_data_folder,
         theorized=True if theorized_lightcurve_df is not None else False,
         path_to_dataset_bank=path_to_dataset_bank,
+        building_for_AD=building_for_AD,
     )
+    if building_for_AD:
+        print("Finished engineering features.")
 
     if store_csv and not lc_and_hosts_df_hydrated.empty:
-        lc_and_hosts_df_hydrated.to_csv(f"{df_path}/{ztf_id}_timeseries.csv")
-        print(f"Saved results for {ztf_id}!\n")
+        if theorized_lightcurve_df is None:
+            lc_and_hosts_df_hydrated.to_csv(f"{df_path}/{ztf_id}_timeseries.csv")
+            print(f"Saved timeseries features for {ztf_id}!\n")
+        else:
+            lc_and_hosts_df_hydrated.to_csv(f"{df_path}/theorized_timeseries.csv")
+            print(f"Saved timeseries features for theorized lightcurve!\n")
 
     return lc_and_hosts_df_hydrated
 
 
-def re_AD_and_plots(
+def re_check_anom_and_plot(
     clf,
     input_ztf_id,
     swapped_host_ztf_id,

@@ -555,7 +555,7 @@ def mod_LAISS(
     ann_elapsed_time = ann_end_time - ann_start_time
     elapsed_time = end_time - start_time
     print(f"\nANN elapsed_time = {round(ann_elapsed_time, 3)} s")
-    print(f"\ntotal elapsed_time = {round(elapsed_time, 3)} s\n")
+    print(f"total elapsed_time = {round(elapsed_time, 3)} s\n")
 
     if savetables:
         print("Saving reference+ANN table...")
@@ -2510,17 +2510,19 @@ def re_build_indexed_sample(
         if save:
             index.save(index_file)
 
-    print("Done!")
+    print("Done!\n")
 
     return index_stem_name_with_path
 
 
 def re_get_timeseries_df(
     ztf_id,
-    theorized_lightcurve_df,
     path_to_timeseries_folder,
     path_to_sfd_data_folder,
+    theorized_lightcurve_df=None,
+    save_timeseries=False,
     path_to_dataset_bank=None,
+    building_for_AD=False,
 ):
     if theorized_lightcurve_df is not None:
         print("Extracting full lightcurve features for theorized lightcurve...")
@@ -2532,23 +2534,25 @@ def re_get_timeseries_df(
             path_to_dataset_bank=path_to_dataset_bank,
             show_lc=False,
             show_host=True,
-            store_csv=False,
+            store_csv=save_timeseries,
         )
         return timeseries_df
 
-    # Check if timeseries already made
-    print(f"Checking if timeseries dataframe for {ztf_id} already exists...")
-    if os.path.exists(f"{path_to_timeseries_folder}/{ztf_id}_timeseries.csv"):
+    # Check if timeseries already made (but must rebuild for AD regardless)
+    if (
+        os.path.exists(f"{path_to_timeseries_folder}/{ztf_id}_timeseries.csv")
+        and not building_for_AD
+    ):
         timeseries_df = pd.read_csv(
             f"{path_to_timeseries_folder}/{ztf_id}_timeseries.csv"
         )
         print(f"Timeseries dataframe for {ztf_id} is already made. Continue!\n")
-
-    # If timeseries is not already made, create it by extracting features
     else:
-        print(
-            f"Timeseries dataframe does not exist. Re-extracting lightcurve and host features for {ztf_id}."
-        )
+        # If timeseries is not made or building for AD, create timeseries by extracting features
+        if not building_for_AD:
+            print(
+                f"Timeseries dataframe does not exist. Re-extracting lightcurve and host features for {ztf_id}."
+            )
         timeseries_df = re_extract_lc_and_host_features(
             ztf_id=ztf_id,
             theorized_lightcurve_df=theorized_lightcurve_df,
@@ -2557,7 +2561,8 @@ def re_get_timeseries_df(
             path_to_dataset_bank=path_to_dataset_bank,
             show_lc=False,
             show_host=True,
-            store_csv=False,
+            store_csv=save_timeseries,
+            building_for_AD=building_for_AD,
         )
     return timeseries_df
 
@@ -2568,6 +2573,7 @@ def re_LAISS_primer(
     dataset_bank_path,
     path_to_timeseries_folder,
     path_to_sfd_data_folder,
+    save_timeseries=False,
     host_ztf_id=None,
     lc_features=[],
     host_features=[],
@@ -2581,6 +2587,11 @@ def re_LAISS_primer(
         )
         raise ValueError(
             "Cannot provide both a transient ZTF ID and a theorized lightcurve."
+        )
+    if lc_ztf_id is None and theorized_lightcurve_df is None:
+        print("Requires one of theorized_lightcurve_df or transient_ztf_id. Try again!")
+        raise ValueError(
+            "Transient ZTF ID and theorized lightcurve cannot both be None."
         )
     if theorized_lightcurve_df is not None and host_ztf_id is None:
         print(
@@ -2614,6 +2625,16 @@ def re_LAISS_primer(
             print(f"{ztf_id} is in dataset_bank.")
             ztf_id_in_dataset_bank = True
 
+            if save_timeseries:
+                timeseries_df = re_get_timeseries_df(
+                    ztf_id=ztf_id,
+                    theorized_lightcurve_df=None,
+                    path_to_timeseries_folder=path_to_timeseries_folder,
+                    path_to_sfd_data_folder=path_to_sfd_data_folder,
+                    path_to_dataset_bank=dataset_bank_path,
+                    save_timeseries=save_timeseries,
+                )
+
         # If ztf_id is not in dataset bank...
         except:
             # Extract timeseries dataframe
@@ -2627,6 +2648,7 @@ def re_LAISS_primer(
                 path_to_timeseries_folder=path_to_timeseries_folder,
                 path_to_sfd_data_folder=path_to_sfd_data_folder,
                 path_to_dataset_bank=dataset_bank_path,
+                save_timeseries=save_timeseries,
             )
 
             # If timeseries_df is from theorized lightcurve, it only has lightcurve features
@@ -2638,7 +2660,7 @@ def re_LAISS_primer(
             timeseries_df = timeseries_df.dropna(subset=subset_feats_for_checking_na)
             if timeseries_df.empty:
                 print(f"{ztf_id} has some NaN features. Abort!")
-                sys.exit(1)
+                return
 
             # Extract feature array from timeseries dataframe
             if not host_loop and theorized_lightcurve_df is not None:
@@ -2911,7 +2933,6 @@ def re_LAISS_nearest_neighbors(
     max_neighbor_dist=None,
     search_k=1000,
     upweight_lc_feats_factor=1,
-    return_results=False,
 ):
     start_time = time.time()
     index_file = annoy_index_file_stem + ".ann"
@@ -2926,9 +2947,10 @@ def re_LAISS_nearest_neighbors(
         print(
             f"Loading previously saved ANNOY PCA={num_pca_components} index:",
             index_file,
+            "\n",
         )
     else:
-        print("Loading previously saved ANNOY index without PCA:", index_file)
+        print("Loading previously saved ANNOY index without PCA:", index_file, "\n")
 
     bank_feat_arr = np.load(
         annoy_index_file_stem + "_feat_arr.npy",
@@ -2987,13 +3009,11 @@ def re_LAISS_nearest_neighbors(
             else:
                 neighbor_dist_dict[ann_index] = [ann_dist]
 
-    print(
-        "Number of unique neighbors found through Monte Carlo:", len(neighbor_dist_dict)
-    )
-
     # Pick n neighbors with lowest median distance
     if len(primer_dict["locus_feat_arrs_mc_l"]) != 0:
-        print(f"Picking top {n} neighbors.")
+        print(
+            f"Number of unique neighbors found through Monte Carlo: {len(neighbor_dist_dict)}.\nPicking top {n} neighbors."
+        )
     medians = {
         idx: 0 if 0 in np.round(dists, 1) else np.median(dists)
         for idx, dists in neighbor_dist_dict.items()
@@ -3058,6 +3078,8 @@ def re_LAISS_nearest_neighbors(
         plt.tight_layout()
         plt.show()
 
+        return None
+
     # Filter neighbors for maximum distance, if provided
     if max_neighbor_dist is not None:
         filtered_neighbors = [
@@ -3108,12 +3130,12 @@ def re_LAISS_nearest_neighbors(
     else:
         print(f"\t\t\t\t\tIAU  SPEC  Z")
     print(
-        f"Input transient: {'https://alerce.online/object/'+primer_dict['lc_ztf_id'] if primer_dict['lc_ztf_id'] else 'Theorized Lightcurve,'} {primer_dict['lc_tns_name']} {primer_dict['lc_tns_cls']} {primer_dict['lc_tns_z']}"
+        f"Input transient: {'https://alerce.online/object/'+primer_dict['lc_ztf_id'] if primer_dict['lc_ztf_id'] else 'Theorized Lightcurve,'} {primer_dict['lc_tns_name']} {primer_dict['lc_tns_cls']} {primer_dict['lc_tns_z']}\n"
     )
     if primer_dict["host_ztf_id"] is not None:
         print(f"\t\t\t\t\t\t\t\t\tZTFID     IAU_NAME SPEC  Z")
         print(
-            f"Transient with host swapped into input: https://alerce.online/object/{primer_dict['host_ztf_id']} {primer_dict['host_tns_name']} {primer_dict['host_tns_cls']} {primer_dict['host_tns_z']}"
+            f"Transient with host swapped into input: https://alerce.online/object/{primer_dict['host_ztf_id']} {primer_dict['host_tns_name']} {primer_dict['host_tns_cls']} {primer_dict['host_tns_z']}\n"
         )
 
     # Plot lightcurves
@@ -3134,28 +3156,26 @@ def re_LAISS_nearest_neighbors(
         ann_alerce_links, tns_ann_names, tns_ann_classes, tns_ann_zs, ann_dists
     ):
         print(f"ANN={neighbor_num}: {al} {iau_name} {spec_cls}, {z}")
-        if return_results:
-            neighbor_dict = {
-                "input_ztf_id": primer_dict["lc_ztf_id"],
-                "input_swapped_host_ztf_id": primer_dict["host_ztf_id"],
-                "neighbor_num": neighbor_num,
-                "ztf_link": al,
-                "dist": dist,
-                "iau_name": iau_name,
-                "spec_cls": spec_cls,
-                "z": z,
-            }
-            storage.append(neighbor_dict)
+        neighbor_dict = {
+            "input_ztf_id": primer_dict["lc_ztf_id"],
+            "input_swapped_host_ztf_id": primer_dict["host_ztf_id"],
+            "neighbor_num": neighbor_num,
+            "ztf_link": al,
+            "dist": dist,
+            "iau_name": iau_name,
+            "spec_cls": spec_cls,
+            "z": z,
+        }
+        storage.append(neighbor_dict)
         neighbor_num += 1
 
     end_time = time.time()
     ann_elapsed_time = ann_end_time - ann_start_time
     elapsed_time = end_time - start_time
     print(f"\nANN elapsed_time: {round(ann_elapsed_time, 3)} s")
-    print(f"\ntotal elapsed_time: {round(elapsed_time, 3)} s\n")
+    print(f"total elapsed_time: {round(elapsed_time, 3)} s\n")
 
-    if return_results:
-        return pd.DataFrame(storage)
+    return pd.DataFrame(storage)
 
 
 def re_anomaly_detection(
@@ -3164,44 +3184,45 @@ def re_anomaly_detection(
     host_features,
     path_to_timeseries_folder,
     path_to_sfd_data_folder,
-    n_estimators,
-    max_depth,
-    random_state,
-    max_features,
     path_to_dataset_bank=None,
 ):
-    # Load the model
-    figure_path = f"../models/cls=binary_n_estimators={n_estimators}_max_depth={max_depth}_rs={random_state}_max_feats={max_features}_cw=balanced/figures"
-    model_path = f"../models/SMOTE_train_test_70-30_min14_kneighbors8/cls=binary_n_estimators={n_estimators}_max_depth={max_depth}_rs={random_state}_max_feats={max_features}_cw=balanced/model"
-    if not os.path.exists(figure_path):
-        os.makedirs(figure_path)
-    if not os.path.exists(model_path):
-        os.makedirs(model_path)
+
+    figure_path = "../models/figures"
+    model_path = "../models"
+
+    os.makedirs(figure_path, exist_ok=True)
+    os.makedirs(model_path, exist_ok=True)
 
     with open(
-        f"{model_path}/cls=binary_n_estimators={n_estimators}_max_depth={max_depth}_rs={random_state}_max_feats={max_features}_cw=balanced.pkl",
+        f"{model_path}/IForest_n500_c0.02_ms1024.pkl",
         "rb",
     ) as f:
-        clf = pickle.load(f)
+        clf = pickle.load(f)  # `clf` is actually the Pipeline
 
-    print("\nRunning AD Model...")
+    print("Running AD Model:\n")
 
-    # TODO: Change this to account for laiss_dict["lc_ztf_id"] being None when using theorized lightcurve
     # Load the timeseries dataframe
+    print("Rebuilding timeseries dataframes for AD...")
     timeseries_df = re_get_timeseries_df(
         ztf_id=laiss_dict["lc_ztf_id"],
+        theorized_lightcurve_df=None,
         path_to_timeseries_folder=path_to_timeseries_folder,
         path_to_sfd_data_folder=path_to_sfd_data_folder,
         path_to_dataset_bank=path_to_dataset_bank,
+        save_timeseries=False,
+        building_for_AD=True,
     )
 
     if laiss_dict["host_ztf_id"] is not None:
         # Swap in the host galaxy
         swapped_host_timeseries_df = re_get_timeseries_df(
             ztf_id=laiss_dict["host_ztf_id"],
+            theorized_lightcurve_df=None,
             path_to_timeseries_folder=path_to_timeseries_folder,
             path_to_sfd_data_folder=path_to_sfd_data_folder,
             path_to_dataset_bank=path_to_dataset_bank,
+            save_timeseries=False,
+            building_for_AD=True,
         )
 
         host_values = swapped_host_timeseries_df[host_features].iloc[0]
@@ -3210,12 +3231,13 @@ def re_anomaly_detection(
 
     timeseries_df_filt_feats = timeseries_df[lc_features + host_features]
 
-    # TODO: Change this to account for laiss_dict["lc_ztf_id"] being None when using theorized lightcurve
     input_lightcurve_locus = antares_client.search.get_by_ztf_object_id(
         ztf_object_id=laiss_dict["lc_ztf_id"]
     )
 
-    re_AD_and_plots(
+    print("\nChecking for anomalies and plotting...")
+
+    re_check_anom_and_plot(
         clf=clf,
         input_ztf_id=laiss_dict["lc_ztf_id"],
         swapped_host_ztf_id=laiss_dict["host_ztf_id"],
@@ -3225,7 +3247,7 @@ def re_anomaly_detection(
         timeseries_df_full=timeseries_df,
         timeseries_df_features_only=timeseries_df_filt_feats,
         ref_info=input_lightcurve_locus,
-        savefig=False,
+        savefig=True,
         figure_path=figure_path,
     )
     return
@@ -3234,6 +3256,7 @@ def re_anomaly_detection(
 def re_LAISS(
     path_to_dataset_bank,
     path_to_timeseries_folder,
+    save_timeseries=False,
     transient_ztf_id=None,  # transient on which to run laiss
     theorized_lightcurve_df=None,  # optional, if provided will be used as a lightcurve instead of the transient_ztf_id
     host_ztf_id_to_swap_in=None,  # will swap the host galaxy of the input transient/theorized lightcurve to this transient's host
@@ -3250,12 +3273,8 @@ def re_LAISS(
     max_neighbor_distance=None,  # optional, will return all neighbors below this distance (but no more than the 'neighbors' argument)
     search_k=5000,  # for ANNOY search
     upweight_lc_feats_factor=1,  # Makes lightcurve features a larger contributor to distance. Setting to 1 does nothing.
-    return_neighbor_results=True,  # returns a list of neighbor dictionaries
     run_AD=True,  # run anomaly detection
-    n_estimators=100,  # anomaly detection parameter
-    max_depth=35,  # anomaly detection parameter
-    random_state=11,  # anomaly detection parameter
-    max_features=35,  # anomaly detection parameter
+    run_NN=True,
 ):
     # build ANNOY indexed sample from dataset bank
     index_stem_name_with_path = re_build_indexed_sample(
@@ -3282,25 +3301,35 @@ def re_LAISS(
         lc_features=lc_feature_names,
         host_features=host_feature_names,
         num_sims=num_mc_simulations,
+        save_timeseries=save_timeseries,
     )
 
     # nearest neighbors search
-    nearest_neighbors_df = re_LAISS_nearest_neighbors(
-        primer_dict=primer_dict,
-        theorized_lightcurve_df=theorized_lightcurve_df,
-        annoy_index_file_stem=index_stem_name_with_path,
-        use_pca=use_pca,
-        num_pca_components=num_pca_components,
-        n=neighbors,
-        suggest_neighbor_num=suggest_neighbor_num,
-        max_neighbor_dist=max_neighbor_distance,
-        search_k=search_k,
-        upweight_lc_feats_factor=upweight_lc_feats_factor,
-        return_results=return_neighbor_results,
-    )
+    nearest_neighbors_df = None
+    if run_NN:
+        nearest_neighbors_df = re_LAISS_nearest_neighbors(
+            primer_dict=primer_dict,
+            theorized_lightcurve_df=theorized_lightcurve_df,
+            annoy_index_file_stem=index_stem_name_with_path,
+            use_pca=use_pca,
+            num_pca_components=num_pca_components,
+            n=neighbors,
+            suggest_neighbor_num=suggest_neighbor_num,
+            max_neighbor_dist=max_neighbor_distance,
+            search_k=search_k,
+            upweight_lc_feats_factor=upweight_lc_feats_factor,
+        )
+
+        # Nearest neighbors returns None if suggesting neighbor output
+        if nearest_neighbors_df is None:
+            return None, None
 
     # annomaly detection
     if run_AD:
+        if theorized_lightcurve_df is not None:
+            print("Cannot run anomaly detection on theorized lightcurve. Skipping AD.")
+            return nearest_neighbors_df, primer_dict
+
         re_anomaly_detection(
             laiss_dict=primer_dict,
             lc_features=lc_feature_names,
@@ -3308,12 +3337,6 @@ def re_LAISS(
             path_to_timeseries_folder=path_to_timeseries_folder,
             path_to_sfd_data_folder=path_to_sfd_data_folder,
             path_to_dataset_bank=path_to_dataset_bank,
-            n_estimators=n_estimators,
-            max_depth=max_depth,
-            random_state=random_state,
-            max_features=max_features,
         )
 
-    if return_neighbor_results:
-        return nearest_neighbors_df, primer_dict
-    return
+    return nearest_neighbors_df, primer_dict
