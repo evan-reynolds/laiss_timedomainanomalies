@@ -175,3 +175,15 @@ figures/ZTF21aaublej_AD.pdf
 models/IForest_n500_c0.02_ms1024_lc0_host18.pkl
 models/IForest_n500_c0.02_ms1024_lc19_host0.pkl
 models/IForest_n500_c0.02_ms1024_lc19_host18.pkl
+figures/corner_plots/host_group_1.png
+figures/corner_plots/host_group_2.png
+figures/corner_plots/host_group_3.png
+figures/corner_plots/host_group_4.png
+figures/corner_plots/lc_group_1.png
+figures/corner_plots/lc_group_2.png
+figures/corner_plots/lc_group_3.png
+figures/corner_plots/lc_group_4.png
+figures/host_grids/ZTF18acbwenp_host_thumbnails_ann=9.pdf
+figures/host_grids/ZTF21aaublej_host_thumbnails_ann=9.pdf
+timeseries/theorized_timeseries.csv
+timeseries/ZTF18acbwenp_timeseries.csv

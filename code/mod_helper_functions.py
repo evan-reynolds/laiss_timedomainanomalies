@@ -23,6 +23,9 @@ from astropy.table import MaskedColumn
 from lightcurve_engineer import *
 from sklearn.impute import KNNImputer
 from sklearn.impute import SimpleImputer
+from matplotlib.backends.backend_pdf import PdfPages
+from astropy.visualization import AsinhStretch, PercentileInterval
+
 
 from astro_prost.helpers import SnRateAbsmag
 from astro_prost.associate import associate_sample
@@ -33,6 +36,9 @@ from timeout_decorator import timeout, TimeoutError
 import sys
 import warnings
 from contextlib import contextmanager
+import io
+import logging
+import requests
 
 
 @contextmanager
@@ -1052,7 +1058,7 @@ def re_build_dataset_bank(
     else:
         for col in ["ra", "dec"]:
             if col not in raw_host_features:
-                raw_host_features.append(col)
+                raw_host_features.insert(0, col)
 
     # if "ztf_object_id" is the index, move it to the first column
     if raw_df_bank.index.name == "ztf_object_id":
@@ -1131,10 +1137,10 @@ def re_build_dataset_bank(
 
     # Engineer the remaining features
     if not theorized:
+        if not building_for_AD:
+            print(f"Engineering remaining features...")
         # Correct host magnitude features for dust
         for band in ["g", "r", "i", "z"]:
-            if not building_for_AD:
-                print(f"Engineering features for band {band}...")
             wip_dataset_bank[band + "KronMagCorrected"] = wip_dataset_bank.apply(
                 lambda row: re_getExtinctionCorrectedMag(
                     transient_row=row,
@@ -1414,7 +1420,7 @@ def re_extract_lc_and_host_features(
             print(f"Creating path {df_path}.")
             os.makedirs(df_path)
 
-        # ra and dec may be needed in feature engineering
+        # Lightcurve ra and dec may be needed in feature engineering
         lc_and_hosts_df["ra"] = ra
         lc_and_hosts_df["dec"] = dec
 
@@ -1445,6 +1451,158 @@ def re_extract_lc_and_host_features(
             print(f"Saved timeseries features for theorized lightcurve!\n")
 
     return lc_and_hosts_df_hydrated
+
+
+def _ps1_list_filenames(ra_deg, dec_deg, flt):
+    """
+    Return the first stack FITS filename for (ra,dec) and *flt* or None.
+    """
+    url = (
+        "https://ps1images.stsci.edu/cgi-bin/ps1filenames.py"
+        f"?ra={ra_deg}&dec={dec_deg}&filters={flt}"
+    )
+    for line in requests.get(url, timeout=20).text.splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        for tok in line.split():
+            if tok.endswith(".fits"):
+                return tok
+    return None
+
+
+def fetch_ps1_cutout(ra_deg, dec_deg, *, size_pix=100, flt="r"):
+    """
+    Grayscale cut-out (2-D float) in a single PS1 filter.
+    """
+    fits_name = _ps1_list_filenames(ra_deg, dec_deg, flt)
+    if fits_name is None:
+        raise RuntimeError(f"No {flt}-band stack at this position")
+
+    url = (
+        "https://ps1images.stsci.edu/cgi-bin/fitscut.cgi"
+        f"?ra={ra_deg}&dec={dec_deg}&size={size_pix}"
+        f"&format=fits&filters={flt}&red={fits_name}"
+    )
+    r = requests.get(url, timeout=40)
+    if r.status_code == 400:
+        raise RuntimeError("Outside PS1 footprint or no data in this filter")
+    r.raise_for_status()
+
+    with fits.open(io.BytesIO(r.content)) as hdul:
+        data = hdul[0].data.astype(float)
+
+    if data is None or data.size == 0 or (data != data).all():
+        raise RuntimeError("Empty FITS array returned")
+
+    data[data != data] = 0.0
+    return data
+
+
+def fetch_ps1_rgb_jpeg(ra_deg, dec_deg, *, size_pix=100):
+    """
+    Colour JPEG (H,W,3  uint8) using PS1 g/r/i stacks.
+    Falls back by *raising* RuntimeError when the server lacks colour data.
+    """
+    url = (
+        "https://ps1images.stsci.edu/cgi-bin/fitscut.cgi"
+        f"?ra={ra_deg}&dec={dec_deg}&size={size_pix}"
+        f"&format=jpeg&filters=grizy&red=i&green=r&blue=g&autoscale=99.5"
+    )
+    r = requests.get(url, timeout=40)
+    if r.status_code == 400:
+        raise RuntimeError("Outside PS1 footprint or no colour data here")
+    r.raise_for_status()
+    img = Image.open(io.BytesIO(r.content)).convert("RGB")
+    return np.array(img)
+
+
+def re_plot_hosts(
+    ztfid_ref,
+    df,
+    figure_path,
+    ann_num,
+    save_pdf=True,
+    imsizepix=100,
+    change_contrast=False,
+    prefer_color=True,
+):
+    """
+    Build 3×3 grids of PS1 thumbnails for each row in *df* and write a PDF.
+
+    Set *prefer_color=False* for r-band grayscale only.  With *prefer_color=True*
+    (default) the code *tries* colour first and quietly falls back to grayscale
+    when colour isn’t available.
+    """
+    Path(figure_path).mkdir(parents=True, exist_ok=True)
+    pdf_path = Path(figure_path) / f"{ztfid_ref}_host_thumbnails_ann={ann_num}.pdf"
+    pdf_pages = PdfPages(pdf_path) if save_pdf else None
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)7s : %(message)s")
+    rows = cols = 3
+    per_page = rows * cols
+    pages = math.ceil(len(df) / per_page)
+
+    for pg in range(pages):
+        fig, axs = plt.subplots(rows, cols, figsize=(6, 6))
+        axs = axs.ravel()
+
+        for k in range(per_page):
+            idx = pg * per_page + k
+            ax = axs[k]
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+            if idx >= len(df):
+                ax.axis("off")
+                continue
+
+            row = df.iloc[idx]
+            ztfid, ra, dec = (
+                str(row["ZTFID"]),
+                float(row["HOST_RA"]),
+                float(row["HOST_DEC"]),
+            )
+
+            try:
+                # validate coordinates
+                if np.isnan(ra) or np.isnan(dec):
+                    raise ValueError("NaN coordinate")
+                SkyCoord(ra * u.deg, dec * u.deg)
+
+                # Attempt colour first (if requested), then grayscale fallback
+                if prefer_color:
+                    try:
+                        im = fetch_ps1_rgb_jpeg(ra, dec, size_pix=imsizepix)
+                        ax.imshow(im, origin="lower")
+                    except Exception as col_err:
+                        im = fetch_ps1_cutout(ra, dec, size_pix=imsizepix, flt="r")
+                        stretch = AsinhStretch() + PercentileInterval(
+                            93 if change_contrast else 99.5
+                        )
+                        ax.imshow(stretch(im), cmap="gray", origin="lower")
+                else:
+                    im = fetch_ps1_cutout(ra, dec, size_pix=imsizepix, flt="r")
+                    stretch = AsinhStretch() + PercentileInterval(
+                        93 if change_contrast else 99.5
+                    )
+                    ax.imshow(stretch(im), cmap="gray", origin="lower")
+
+                ax.set_title(ztfid, fontsize=8, pad=1.5)
+
+            except Exception as e:
+                logging.warning(f"{ztfid}: {e}")
+                ax.imshow(np.full((imsizepix, imsizepix, 3), [1.0, 0, 0]))
+                ax.set_title("", fontsize=8, pad=1.5)
+
+        plt.tight_layout(pad=0.2)
+        if pdf_pages:
+            pdf_pages.savefig(fig, bbox_inches="tight", pad_inches=0.05)
+        plt.show(block=False)
+        plt.close(fig)
+
+    if pdf_pages:
+        pdf_pages.close()
+        print(f"PDF written to {pdf_path}\n")
 
 
 def re_check_anom_and_plot(
@@ -1598,9 +1756,10 @@ def re_check_anom_and_plot(
 
     if savefig:
         os.makedirs(figure_path, exist_ok=True)
+        os.makedirs(figure_path + "/AD", exist_ok=True)
         plt.savefig(
             (
-                f"{figure_path}/{input_ztf_id}"
+                f"{figure_path}/AD/{input_ztf_id}"
                 + (f"_w_host_{swapped_host_ztf_id}" if swapped_host_ztf_id else "")
                 + "_AD.pdf"
             ),

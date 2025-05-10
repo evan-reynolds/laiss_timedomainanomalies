@@ -13,6 +13,8 @@ from kneed import KneeLocator
 import pickle
 from sklearn.pipeline import Pipeline
 from pyod.models.iforest import IForest
+import corner
+from statsmodels import robust
 
 
 def mod_build_indexed_sample(
@@ -2606,6 +2608,11 @@ def re_LAISS_primer(
             "If providing a theorized lightcurve, must also provide a host galaxy ZTF ID."
         )
 
+    host_galaxy_ra = None
+    host_galaxy_dec = None
+    lc_galaxy_ra = None
+    lc_galaxy_dec = None
+
     # Loop through lightcurve object and host object to create feature array
     for ztf_id, host_loop in [(lc_ztf_id, False), (host_ztf_id, True)]:
 
@@ -2629,6 +2636,14 @@ def re_LAISS_primer(
 
             print(f"{ztf_id} is in dataset_bank.")
             ztf_id_in_dataset_bank = True
+
+            df_bank_input_only = df_bank.loc[[ztf_id]]
+            if host_loop:
+                host_galaxy_ra = df_bank_input_only.iloc[0].host_ra
+                host_galaxy_dec = df_bank_input_only.iloc[0].host_dec
+            else:
+                lc_galaxy_ra = df_bank_input_only.iloc[0].host_ra
+                lc_galaxy_dec = df_bank_input_only.iloc[0].host_dec
 
             if save_timeseries:
                 timeseries_df = re_get_timeseries_df(
@@ -2657,6 +2672,14 @@ def re_LAISS_primer(
                 save_timeseries=save_timeseries,
                 swapped_host=host_loop,
             )
+
+            if host_loop:
+                host_galaxy_ra = timeseries_df["raMean"].iloc[0]
+                host_galaxy_dec = timeseries_df["decMean"].iloc[0]
+            else:
+                if theorized_lightcurve_df is None:
+                    lc_galaxy_ra = timeseries_df["raMean"].iloc[0]
+                    lc_galaxy_dec = timeseries_df["decMean"].iloc[0]
 
             # If timeseries_df is from theorized lightcurve, it only has lightcurve features
             if not host_loop and theorized_lightcurve_df is not None:
@@ -2742,6 +2765,8 @@ def re_LAISS_primer(
         "host_ztf_id_in_dataset_bank": (
             host_ztf_id_in_dataset_bank if host_ztf_id is not None else None
         ),
+        "host_galaxy_ra": host_galaxy_ra if host_ztf_id is not None else None,
+        "host_galaxy_dec": host_galaxy_dec if host_ztf_id is not None else None,
         "lc_ztf_id": lc_ztf_id,
         "lc_tns_name": lc_tns_name,
         "lc_tns_cls": lc_tns_cls,
@@ -2749,6 +2774,8 @@ def re_LAISS_primer(
         "lc_ztf_id_in_dataset_bank": lc_ztf_id_in_dataset_bank,
         "locus_feat_arr": locus_feat_arr,
         "locus_feat_arrs_mc_l": locus_feat_arrs_mc_l,
+        "lc_galaxy_ra": lc_galaxy_ra,
+        "lc_galaxy_dec": lc_galaxy_dec,
     }
 
     return output_dict
@@ -2925,6 +2952,7 @@ def re_plot_lightcurves(
 def re_LAISS_nearest_neighbors(
     primer_dict,
     theorized_lightcurve_df,
+    path_to_dataset_bank,
     annoy_index_file_stem,
     use_pca=False,
     num_pca_components=15,
@@ -2933,6 +2961,7 @@ def re_LAISS_nearest_neighbors(
     max_neighbor_dist=None,
     search_k=1000,
     upweight_lc_feats_factor=1,
+    path_to_figure_directory="../figures",
 ):
     start_time = time.time()
     index_file = annoy_index_file_stem + ".ann"
@@ -3143,6 +3172,51 @@ def re_LAISS_nearest_neighbors(
         tns_ann_zs=tns_ann_zs,
     )
 
+    # Plot hosts
+    print("\nGenerating hosts grid plot...")
+
+    df_bank = pd.read_csv(path_to_dataset_bank, index_col="ztf_object_id")
+
+    hosts_to_plot = neighbor_ztfids.copy()
+    host_ra_l, host_dec_l = [], []
+
+    for ztfid in hosts_to_plot:
+        host_ra, host_dec = (
+            df_bank.loc[ztfid].host_ra,
+            df_bank.loc[ztfid].host_dec,
+        )
+        host_ra_l.append(host_ra), host_dec_l.append(host_dec)
+
+    # Add input host for plotting
+    if primer_dict["host_ztf_id"] is None:
+        hosts_to_plot.insert(0, primer_dict["lc_ztf_id"])
+        host_ra_l.insert(0, primer_dict["lc_galaxy_ra"])
+        host_dec_l.insert(0, primer_dict["lc_galaxy_dec"])
+    else:
+        hosts_to_plot.insert(0, primer_dict["host_ztf_id"])
+        host_ra_l.insert(0, primer_dict["host_galaxy_ra"])
+        host_dec_l.insert(0, primer_dict["host_galaxy_dec"])
+
+    host_ann_df = pd.DataFrame(
+        zip(hosts_to_plot, host_ra_l, host_dec_l),
+        columns=["ZTFID", "HOST_RA", "HOST_DEC"],
+    )
+    re_plot_hosts(
+        ztfid_ref=(
+            primer_dict["lc_ztf_id"]
+            if primer_dict["host_ztf_id"] is None
+            else primer_dict["host_ztf_id"]
+        ),
+        df=host_ann_df,
+        figure_path=path_to_figure_directory + "/host_grids",
+        ann_num=n,
+        save_pdf=True,
+        imsizepix=100,
+        change_contrast=False,
+        prefer_color=True,
+    )
+
+    # Store neighbors and return
     storage = []
     neighbor_num = 1
     for al, iau_name, spec_cls, z, dist in zip(
@@ -3376,6 +3450,7 @@ def re_LAISS(
 
         nearest_neighbors_df = re_LAISS_nearest_neighbors(
             primer_dict=primer_dict,
+            path_to_dataset_bank=path_to_dataset_bank,
             theorized_lightcurve_df=theorized_lightcurve_df,
             annoy_index_file_stem=index_stem_name_with_path,
             use_pca=use_pca,
@@ -3385,6 +3460,7 @@ def re_LAISS(
             max_neighbor_dist=max_neighbor_distance,
             search_k=search_k,
             upweight_lc_feats_factor=upweight_lc_feats_factor,
+            path_to_figure_directory=path_to_figure_directory,
         )
 
     if run_AD:
@@ -3410,4 +3486,165 @@ def re_LAISS(
     if run_NN or suggest_neighbor_num:
         return nearest_neighbors_df, primer_dict
 
+    return
+
+
+import math
+
+
+def create_re_laiss_features_dict(
+    lc_feature_names, host_feature_names, lc_groups=4, host_groups=4
+):
+    re_laiss_features_dict = {}
+
+    # Split light curve features into evenly sized chunks
+    lc_chunk_size = math.ceil(len(lc_feature_names) / lc_groups)
+    for i in range(lc_groups):
+        start = i * lc_chunk_size
+        end = start + lc_chunk_size
+        chunk = lc_feature_names[start:end]
+        if chunk:
+            re_laiss_features_dict[f"lc_group_{i+1}"] = chunk
+
+    # Split host features into evenly sized chunks
+    host_chunk_size = math.ceil(len(host_feature_names) / host_groups)
+    for i in range(host_groups):
+        start = i * host_chunk_size
+        end = start + host_chunk_size
+        chunk = host_feature_names[start:end]
+        if chunk:
+            re_laiss_features_dict[f"host_group_{i+1}"] = chunk
+
+    return re_laiss_features_dict
+
+
+def re_corner_plot(
+    neighbors_df,
+    primer_dict,
+    path_to_dataset_bank,
+    lc_feature_names=[],  # Must be passed in just as they were passed to nearest neighbors
+    host_feature_names=[],  # # Must be passed in just as they were passed to nearest neighbors
+    remove_outliers_bool=True,
+    path_to_figure_directory="../figures",
+    save_plots=True,
+):
+
+    if save_plots:
+        os.makedirs(path_to_figure_directory, exist_ok=True)
+        os.makedirs(path_to_figure_directory + "/corner_plots", exist_ok=True)
+
+    logging.getLogger().setLevel(logging.ERROR)
+
+    re_laiss_features_dict = create_re_laiss_features_dict(
+        lc_feature_names, host_feature_names
+    )
+
+    neighbor_ztfids = [link.split("/")[-1] for link in neighbors_df["ztf_link"]]
+
+    dataset_bank_df = pd.read_csv(path_to_dataset_bank)[
+        ["ztf_object_id"] + lc_feature_names + host_feature_names
+    ]
+    print("Total number of transients for corner plots:", dataset_bank_df.shape[0])
+
+    for batch_name, features in re_laiss_features_dict.items():
+        print(f"Creating corner plot for {batch_name}...")
+
+        # REMOVING OUTLIERS #
+        def remove_outliers(df, threshold=7):
+            df_clean = df.copy()
+            numeric_cols = df_clean.select_dtypes(include=[np.number]).columns
+
+            for col in numeric_cols:
+                col_data = df_clean[col]
+                median_val = col_data.median()
+                mad_val = robust.mad(
+                    col_data
+                )  # By default uses 0.6745 scale factor internally
+
+                # If MAD is zero, it means the column has too little variation (or all same values).
+                # In that case, skip it to avoid removing all rows.
+                if mad_val == 0:
+                    continue
+
+                # Compute robust z-scores
+                robust_z = 0.6745 * (col_data - median_val) / mad_val
+
+                # Keep only points where the robust z-score is within the threshold
+                df_clean = df_clean[abs(robust_z) <= threshold]
+
+            return df_clean
+
+        dataset_bank_df_batch_features = dataset_bank_df[["ztf_object_id"] + features]
+
+        if remove_outliers_bool:
+            dataset_bank_df_batch_features = remove_outliers(
+                dataset_bank_df_batch_features
+            )
+            print(
+                "Total number of transients for corner plot after outlier removal:",
+                dataset_bank_df_batch_features.shape[0],
+            )
+        else:
+            dataset_bank_df_batch_features = dataset_bank_df_batch_features.replace(
+                [np.inf, -np.inf, -999], np.nan
+            ).dropna()
+            print(
+                "Total number of transients for corner plot after NA, inf, and -999 removal:",
+                dataset_bank_df_batch_features.shape[0],
+            )
+        # REMOVING OUTLIERS #
+        neighbor_mask = dataset_bank_df_batch_features["ztf_object_id"].isin(
+            neighbor_ztfids
+        )
+        features_df = dataset_bank_df_batch_features[features]
+
+        # remove 'feature_' from column names
+        features_df.columns = [
+            col.replace("feature_", "", 1) if col.startswith("feature_") else col
+            for col in features_df.columns
+        ]
+
+        neighbor_features = features_df[neighbor_mask]
+        non_neighbor_features = features_df[~neighbor_mask]
+
+        col_order = lc_feature_names + host_feature_names
+        queried_transient_feat_df = pd.DataFrame(
+            [primer_dict["locus_feat_arr"]], columns=col_order
+        )
+        queried_features_arr = queried_transient_feat_df[features].values[0]
+
+        figure = corner.corner(
+            non_neighbor_features,
+            color="blue",
+            labels=features_df.columns,
+            plot_datapoints=True,
+            alpha=0.3,
+            plot_contours=False,
+            truths=queried_features_arr,
+            truth_color="green",
+        )
+
+        # Overlay neighbor features (red) with larger, visible markers
+        axes = np.array(figure.axes).reshape(len(features), len(features))
+        for i in range(len(features)):
+            for j in range(i):  # Only the lower triangle of the plot
+                ax = axes[i, j]
+                ax.scatter(
+                    neighbor_features.iloc[:, j],
+                    neighbor_features.iloc[:, i],
+                    color="red",
+                    s=10,
+                    marker="x",
+                    linewidth=2,
+                )
+        if save_plots:
+            plt.savefig(
+                path_to_figure_directory + f"/corner_plots/{batch_name}",
+                dpi=300,
+                bbox_inches="tight",
+            )
+
+        plt.show()
+
+    print("Finished creating all plots!")
     return
