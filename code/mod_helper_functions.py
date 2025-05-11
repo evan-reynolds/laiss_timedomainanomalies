@@ -41,20 +41,37 @@ import logging
 import requests
 
 
+# @contextmanager
+# def re_suppress_output():
+#     with open(os.devnull, "w") as devnull:
+#         old_stdout = sys.stdout
+#         old_stderr = sys.stderr
+#         sys.stdout = devnull
+#         sys.stderr = devnull
+#         with warnings.catch_warnings():
+#             warnings.simplefilter("ignore")
+#             try:
+#                 yield
+#             finally:
+#                 sys.stdout = old_stdout
+#                 sys.stderr = old_stderr
+
+
 @contextmanager
 def re_suppress_output():
+    """Temporarily silence stdout, stderr, warnings *and* all logging messages < CRITICAL."""
     with open(os.devnull, "w") as devnull:
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
-        sys.stdout = devnull
-        sys.stderr = devnull
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            try:
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = devnull, devnull
+
+        logging.disable(logging.CRITICAL)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
                 yield
-            finally:
-                sys.stdout = old_stdout
-                sys.stderr = old_stderr
+        finally:
+            logging.disable(logging.NOTSET)
+            sys.stdout, sys.stderr = old_stdout, old_stderr
 
 
 def mod_extract_lc_and_host_features(
@@ -545,7 +562,6 @@ def mod_plot_RFC_prob_vs_lc_ztfid(
             dpi=300,
             bbox_inches="tight",
         )
-
     plt.show()
 
 
@@ -713,7 +729,6 @@ def plot_RFC_prob_vs_lc_yse_IAUid(
             dpi=300,
             bbox_inches="tight",
         )
-
     plt.show()
 
 
@@ -1001,7 +1016,7 @@ def host_pdfs(
 
     if save_pdf:
         pdf_pages.close()
-        print(f"PDF saved at: {pdf_path}")
+        print(f"Host grid PDF saved at: {pdf_path}")
 
 
 def re_getTnsData(ztf_id):
@@ -1213,10 +1228,9 @@ def re_extract_lc_and_host_features(
         mjd_idx_at_min_mag_r_ref = df_ref_r[["ant_mag"]].reset_index().idxmin().ant_mag
         mjd_idx_at_min_mag_g_ref = df_ref_g[["ant_mag"]].reset_index().idxmin().ant_mag
     except:
-        print(
+        raise ValueError(
             f"No observations for {ztf_id if theorized_lightcurve_df is None else 'theorized lightcurve'}. Abort!\n"
         )
-        return
 
     # Plot lightcurve
     if show_lc:
@@ -1249,10 +1263,9 @@ def re_extract_lc_and_host_features(
     lightcurve = lightcurve.sort_values(by="ant_mjd").reset_index(drop=True).dropna()
     min_obs_count = 5
     if len(lightcurve) < min_obs_count:
-        print(
+        raise ValueError(
             f"Not enough observations for {ztf_id if theorized_lightcurve_df is None else 'theorized lightcurve'}. Abort!\n"
         )
-        return
 
     # Engineer features in time
     lc_col_names = constants.lc_features_const.copy()
@@ -1313,9 +1326,6 @@ def re_extract_lc_and_host_features(
     end_time = time.time()
 
     if lc_timeseries_feat_df.empty and not swapped_host:
-        print(
-            f"Failed to extract features for {ztf_id if theorized_lightcurve_df is None else 'theorized lightcurve'}. Abort!"
-        )
         raise ValueError(
             f"Failed to extract features for {ztf_id if theorized_lightcurve_df is None else 'theorized lightcurve'}"
         )
@@ -1443,6 +1453,7 @@ def re_extract_lc_and_host_features(
         print("Finished engineering features.\n")
 
     if store_csv and not lc_and_hosts_df_hydrated.empty:
+        os.makedirs(df_path, exist_ok=True)
         if theorized_lightcurve_df is None:
             lc_and_hosts_df_hydrated.to_csv(f"{df_path}/{ztf_id}_timeseries.csv")
             print(f"Saved timeseries features for {ztf_id}!\n")
@@ -1518,6 +1529,7 @@ def fetch_ps1_rgb_jpeg(ra_deg, dec_deg, *, size_pix=100):
 
 def re_plot_hosts(
     ztfid_ref,
+    plot_label,
     df,
     figure_path,
     ann_num,
@@ -1533,8 +1545,10 @@ def re_plot_hosts(
     (default) the code *tries* colour first and quietly falls back to grayscale
     when colour isn’t available.
     """
-    Path(figure_path).mkdir(parents=True, exist_ok=True)
-    pdf_path = Path(figure_path) / f"{ztfid_ref}_host_thumbnails_ann={ann_num}.pdf"
+    os.makedirs(figure_path, exist_ok=True)
+    host_grid_path = figure_path + "/host_grids"
+    Path(host_grid_path).mkdir(parents=True, exist_ok=True)
+    pdf_path = Path(host_grid_path) / f"{plot_label}_host_thumbnails_ann={ann_num}.pdf"
     pdf_pages = PdfPages(pdf_path) if save_pdf else None
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)7s : %(message)s")
@@ -1766,5 +1780,10 @@ def re_check_anom_and_plot(
             dpi=300,
             bbox_inches="tight",
         )
-
+        print(
+            "Saved anomaly detection chart to:"
+            + f"{figure_path}/AD/{input_ztf_id}"
+            + (f"_w_host_{swapped_host_ztf_id}" if swapped_host_ztf_id else "")
+            + "_AD.pdf"
+        )
     plt.show()

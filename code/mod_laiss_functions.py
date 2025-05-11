@@ -15,6 +15,7 @@ from sklearn.pipeline import Pipeline
 from pyod.models.iforest import IForest
 import corner
 from statsmodels import robust
+import math
 
 
 def mod_build_indexed_sample(
@@ -807,7 +808,6 @@ def mod_LAISS(
             print(
                 f"PDF saved at: {figure_path}/{LC_ztfid_ref}_stacked_lightcurve_ann={ann_num}.pdf"
             )
-
         plt.show()
 
     if show_hosts_grid:
@@ -2413,27 +2413,25 @@ def re_build_indexed_sample(
     use_pca=False,
     n_components=None,
     num_trees=1000,
-    index_folder_relative_path="",
+    path_to_index_directory="",
     save=True,
     force_recreation_of_index=False,
-    upweight_lc_feats_factor=1,
+    weight_lc_feats_factor=1,
 ):
     df_bank = pd.read_csv(dataset_bank_path)
 
     # Confirm that the first column is the ZTF ID, and index by ZTF ID
     if df_bank.columns[0] != "ztf_object_id":
-        print(
+        raise ValueError(
             f"Error: Expected first column in dataset bank to be 'ztf_object_id', but got '{df_bank.columns[0]}' instead."
         )
-        sys.exit(1)
     df_bank = df_bank.set_index("ztf_object_id")
 
     # Ensure proper user input of features
     num_lc_features = len(lc_features)
     num_host_features = len(host_features)
     if num_lc_features + num_host_features == 0:
-        print("Error: must provide at least one lightcurve or host feature.")
-        sys.exit(1)
+        raise ValueError("Error: must provide at least one lightcurve or host feature.")
     if num_lc_features == 0:
         print(
             f"No lightcurve features provided. Running host-only LAISS with {num_host_features} features."
@@ -2456,24 +2454,25 @@ def re_build_indexed_sample(
     if not use_pca:
         # Upweight lightcurve features
         num_lc_feats = len(lc_features)
-        feat_arr_scaled[:, :num_lc_feats] *= upweight_lc_feats_factor
+        feat_arr_scaled[:, :num_lc_feats] *= weight_lc_feats_factor
 
     if use_pca:
-        if upweight_lc_feats_factor != 1:
+        if weight_lc_feats_factor != 1:
             print(
-                "Ignoring upweighted lightcurve feature factor. Not compatible with PCA."
+                "Ignoring weighted lightcurve feature factor. Not compatible with PCA."
             )
         random_seed = 88
         pcaModel = PCA(n_components=n_components, random_state=random_seed)
         feat_arr_scaled_pca = pcaModel.fit_transform(feat_arr_scaled)
 
     # Save PCA and non-PCA index arrays to binary files
+    os.makedirs(path_to_index_directory, exist_ok=True)
     index_stem_name = (
         f"re_laiss_annoy_index_pca{use_pca}"
         + (f"_{n_components}comps" if use_pca else "")
         + f"_{num_lc_features}lc_{num_host_features}host"
     )
-    index_stem_name_with_path = index_folder_relative_path + "/" + index_stem_name
+    index_stem_name_with_path = path_to_index_directory + "/" + index_stem_name
     if save:
         np.save(f"{index_stem_name_with_path}_idx_arr.npy", idx_arr)
         np.save(f"{index_stem_name_with_path}_feat_arr.npy", feat_arr)
@@ -2628,10 +2627,10 @@ def re_LAISS_primer(
             # Check to make sure all features are in the dataset bank
             missing_cols = [col for col in feature_names if col not in df_bank.columns]
             if missing_cols:
-                print(
+                raise KeyError(
                     f"KeyError: The following columns are not in the raw data provided: {missing_cols}. Abort!"
                 )
-                return
+
             locus_feat_arr = df_bank.loc[ztf_id]
 
             print(f"{ztf_id} is in dataset_bank.")
@@ -2689,8 +2688,7 @@ def re_LAISS_primer(
 
             timeseries_df = timeseries_df.dropna(subset=subset_feats_for_checking_na)
             if timeseries_df.empty:
-                print(f"{ztf_id} has some NaN features. Abort!")
-                return
+                raise ValueError(f"{ztf_id} has some NaN features. Abort!")
 
             # Extract feature array from timeseries dataframe
             if not host_loop and theorized_lightcurve_df is not None:
@@ -2776,6 +2774,8 @@ def re_LAISS_primer(
         "locus_feat_arrs_mc_l": locus_feat_arrs_mc_l,
         "lc_galaxy_ra": lc_galaxy_ra,
         "lc_galaxy_dec": lc_galaxy_dec,
+        "lc_feat_names": lc_features,
+        "host_feat_names": host_features,
     }
 
     return output_dict
@@ -2783,6 +2783,7 @@ def re_LAISS_primer(
 
 def re_plot_lightcurves(
     primer_dict,
+    plot_label,
     theorized_lightcurve_df,
     neighbor_ztfids,
     ann_locus_l,
@@ -2790,6 +2791,8 @@ def re_plot_lightcurves(
     tns_ann_names,
     tns_ann_classes,
     tns_ann_zs,
+    figure_path,
+    save_figures=True,
 ):
     print("Making a plot of stacked lightcurves...")
 
@@ -2807,8 +2810,7 @@ def re_plot_lightcurves(
         try:
             df_ref = ref_info.timeseries.to_pandas()
         except:
-            print("No timeseries data...pass!")
-            pass
+            raise ValueError(f"{ztf_id} has no timeseries data.")
     else:
         df_ref = theorized_lightcurve_df
 
@@ -2826,15 +2828,8 @@ def re_plot_lightcurves(
         yerr=df_ref_r.ant_magerr,
         fmt="o",
         c="r",
-        label=(
-            f"{primer_dict['lc_ztf_id'] if primer_dict['lc_ztf_id'] is not None else 'Theorized LC'}"
-            + (
-                f" w/ host from {primer_dict['host_ztf_id']},"
-                if primer_dict["host_ztf_id"] is not None
-                else ","
-            )
-            + f"\nd=0, {primer_dict['lc_tns_name']}, {primer_dict['lc_tns_cls']}, z={primer_dict['lc_tns_z']}"
-        ),
+        label=plot_label
+        + f",\nd=0, {primer_dict['lc_tns_name']}, {primer_dict['lc_tns_cls']}, z={primer_dict['lc_tns_z']}",
     )
     ax.errorbar(
         x=df_ref_g.ant_mjd - df_ref_g.ant_mjd.iloc[mjd_idx_at_min_mag_g_ref],
@@ -2946,6 +2941,17 @@ def re_plot_lightcurves(
                 f"Something went wrong with plotting {ztfname}! Error is {e}. Continue..."
             )
 
+    if save_figures:
+        os.makedirs(figure_path, exist_ok=True)
+        os.makedirs(figure_path + "/lightcurves", exist_ok=True)
+        plt.savefig(
+            figure_path + f"/lightcurves/{plot_label}.png",
+            dpi=300,
+            bbox_inches="tight",
+        )
+        print(
+            "Saved lightcurve plot to:" + figure_path + f"/lightcurves/{plot_label}.png"
+        )
     plt.show()
 
 
@@ -2960,15 +2966,24 @@ def re_LAISS_nearest_neighbors(
     suggest_neighbor_num=False,
     max_neighbor_dist=None,
     search_k=1000,
-    upweight_lc_feats_factor=1,
+    weight_lc_feats_factor=1,
+    save_figures=True,
     path_to_figure_directory="../figures",
 ):
     start_time = time.time()
     index_file = annoy_index_file_stem + ".ann"
 
     if n is None or n <= 0:
-        print("Neighbor number must be a nonzero integer. Abort!")
-        return
+        raise ValueError("Neighbor number must be a nonzero integer. Abort!")
+
+    plot_label = (
+        f"{primer_dict['lc_ztf_id'] if primer_dict['lc_ztf_id'] is not None else 'theorized_lc'}"
+        + (
+            f"_host_from_{primer_dict['host_ztf_id']}"
+            if primer_dict["host_ztf_id"] is not None
+            else ""
+        )
+    )
 
     # Find neighbors for every Monte Carlo feature array
     scaler = preprocessing.StandardScaler()
@@ -3001,7 +3016,7 @@ def re_LAISS_nearest_neighbors(
         if not use_pca:
             # Upweight lightcurve features
             num_lc_feats = len(constants.lc_features_const.copy())
-            locus_feat_arr_scaled[:, :num_lc_feats] *= upweight_lc_feats_factor
+            locus_feat_arr_scaled[:, :num_lc_feats] *= weight_lc_feats_factor
 
         if use_pca:
             # Transform the scaled locus_feat_arr using the same PCA model
@@ -3055,7 +3070,7 @@ def re_LAISS_nearest_neighbors(
 
     if ann_dists[0] == 0:
         print(
-            "First neighbor is input transient, so it will be excluded. The final neighbor count will be one less than expected."
+            "First neighbor is input transient, so it will be excluded. Final neighbor count will be one less than expected."
         )
         # drop first neighbor, which is input transient
         ann_dists = ann_dists[1:]
@@ -3079,13 +3094,13 @@ def re_LAISS_nearest_neighbors(
         )
         optimal_n = knee.knee
 
-        if optimal_n is not None:
+        if optimal_n is None:
             print(
-                f"Suggested number of neighbors is {optimal_n}, chosen by comparing {n} neighbors."
+                "Couldn't identify optimal number of neighbors. Try a larger neighbor pool."
             )
         else:
             print(
-                "Couldn't identify optimal number of neighbors. Try a larger neighbor pool."
+                f"Suggested number of neighbors is {optimal_n}, chosen by comparing {n} neighbors."
             )
 
         plt.figure(figsize=(10, 4))
@@ -3097,7 +3112,10 @@ def re_LAISS_nearest_neighbors(
         )
         if optimal_n:
             plt.axvline(
-                optimal_n, color="red", linestyle="--", label=f"Elbow at {optimal_n}"
+                optimal_n,
+                color="red",
+                linestyle="--",
+                label=f"Elbow at {optimal_n}",
             )
         plt.xlabel("Neighbor Number")
         plt.ylabel("Distance")
@@ -3105,9 +3123,27 @@ def re_LAISS_nearest_neighbors(
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
+
+        if save_figures:
+            os.makedirs(path_to_figure_directory, exist_ok=True)
+            os.makedirs(
+                path_to_figure_directory + "/neighbor_dist_plots/", exist_ok=True
+            )
+            plt.savefig(
+                path_to_figure_directory
+                + f"/neighbor_dist_plots/{plot_label}_n={n}.png",
+                dpi=300,
+                bbox_inches="tight",
+            )
+            print(
+                f"Saved neighbor distances plot to {path_to_figure_directory}/neighbor_dist_plots/n={n}"
+            )
         plt.show()
 
-        return None
+        print(
+            "Stopping nearest neighbor search after suggesting neighbor number. Set suggest_neighbor_num=False for full search.\n"
+        )
+        return
 
     # Filter neighbors for maximum distance, if provided
     if max_neighbor_dist is not None:
@@ -3123,7 +3159,7 @@ def re_LAISS_nearest_neighbors(
         ann_dists = list(ann_dists)
 
         if len(ann_dists) == 0:
-            print(
+            raise ValueError(
                 f"No neighbors found for distance threshold of {abs(max_neighbor_dist)}. Try a larger maximum distance."
             )
         else:
@@ -3163,6 +3199,7 @@ def re_LAISS_nearest_neighbors(
     # Plot lightcurves
     re_plot_lightcurves(
         primer_dict=primer_dict,
+        plot_label=plot_label,
         theorized_lightcurve_df=theorized_lightcurve_df,
         neighbor_ztfids=neighbor_ztfids,
         ann_locus_l=ann_locus_l,
@@ -3170,6 +3207,8 @@ def re_LAISS_nearest_neighbors(
         tns_ann_names=tns_ann_names,
         tns_ann_classes=tns_ann_classes,
         tns_ann_zs=tns_ann_zs,
+        figure_path=path_to_figure_directory,
+        save_figures=save_figures,
     )
 
     # Plot hosts
@@ -3201,16 +3240,18 @@ def re_LAISS_nearest_neighbors(
         zip(hosts_to_plot, host_ra_l, host_dec_l),
         columns=["ZTFID", "HOST_RA", "HOST_DEC"],
     )
+
     re_plot_hosts(
         ztfid_ref=(
             primer_dict["lc_ztf_id"]
             if primer_dict["host_ztf_id"] is None
             else primer_dict["host_ztf_id"]
         ),
+        plot_label=plot_label,
         df=host_ann_df,
-        figure_path=path_to_figure_directory + "/host_grids",
+        figure_path=path_to_figure_directory,
         ann_num=n,
-        save_pdf=True,
+        save_pdf=save_figures,
         imsizepix=100,
         change_contrast=False,
         prefer_color=True,
@@ -3293,6 +3334,7 @@ def re_train_AD_model(
     pipeline.fit(X)
 
     # Save model
+    os.makedirs(model_dir, exist_ok=True)
     with open(os.path.join(model_dir, model_name), "wb") as f:
         pickle.dump(pipeline, f)
 
@@ -3313,7 +3355,8 @@ def re_anomaly_detection(
     path_to_dataset_bank,
     host_ztf_id_to_swap_in=None,
     path_to_models_directory="../models",
-    path_to_figure_directory="../models/figures",
+    path_to_figure_directory="../figures",
+    save_figures=True,
     n_estimators=500,
     contamination=0.02,
     max_samples=1024,
@@ -3383,7 +3426,7 @@ def re_anomaly_detection(
         timeseries_df_full=timeseries_df,
         timeseries_df_features_only=timeseries_df_filt_feats,
         ref_info=input_lightcurve_locus,
-        savefig=True,
+        savefig=save_figures,
         figure_path=path_to_figure_directory,
     )
     return
@@ -3391,8 +3434,8 @@ def re_anomaly_detection(
 
 def re_LAISS(
     path_to_dataset_bank,
-    path_to_timeseries_folder,
-    save_timeseries=False,
+    path_to_timeseries_folder="../timeseries",
+    save_timeseries=True,
     transient_ztf_id=None,  # transient on which to run laiss
     theorized_lightcurve_df=None,  # optional, if provided will be used as a lightcurve instead of the transient_ztf_id
     host_ztf_id_to_swap_in=None,  # will swap the host galaxy of the input transient/theorized lightcurve to this transient's host
@@ -3400,23 +3443,24 @@ def re_LAISS(
     lc_feature_names=[],  # Leave blank for host-only LAISS
     path_to_sfd_data_folder="../data/sfddata-master",  # to correct extracted magnitudes for dust; not needed if transient_ztf_id in dataset bank
     use_pca=False,
-    num_pca_components=20,  # Only matters if use_pca = True
+    num_pca_components=15,  # Only matters if use_pca = True
     force_recreation_of_annoy_index=False,  # Rebuild indexed space for ANNOY even if it already exists
-    index_folder_relative_path="../data/re_LAISS/index_files",  # folder to store ANNOY indices
+    path_to_index_directory="../annoy_indices",  # folder to store ANNOY indices
     neighbors=10,  # will return this number of neighbors unless filtered by max_neighbor_distance
     num_mc_simulations=0,  # set to 0 to turn off simulation. If not using pca, set to 20. Not reccomended for use with pca.
-    suggest_neighbor_num=False,  # plot distances of neighbors to help choose optimal neighbor number
+    suggest_neighbor_num=False,  # plot distances of neighbors to help choose optimal neighbor number. If true, will stop nearest nearest neighbors and return nearest_neighbors_df, primer_dict but nearest_neighbors_df will be None.
     max_neighbor_distance=None,  # optional, will return all neighbors below this distance (but no more than the 'neighbors' argument)
     search_k=5000,  # for ANNOY search
-    upweight_lc_feats_factor=1,  # Makes lightcurve features a larger contributor to distance. Setting to 1 does nothing.
+    weight_lc_feats_factor=1,  # Makes lightcurve features a larger contributor to distance. Setting to 1 does nothing.
     run_AD=True,  # run anomaly detection
-    run_NN=True,
+    run_NN=True,  # Run nearest neighbors. Will get cut off if suggest_neighbor_num=True.
     path_to_models_directory="../models",
     path_to_figure_directory="../figures",
-    n_estimators=500,
-    contamination=0.02,
-    max_samples=1024,
-    force_AD_retrain=False,
+    n_estimators=500,  # AD model param
+    contamination=0.02,  # AD model param
+    max_samples=1024,  # AD model param
+    force_AD_retrain=False,  # Retrains and saves AD model even if it already exists
+    save_figures=True,  # Saves all figures while running LAISS
 ):
 
     if run_NN or suggest_neighbor_num:
@@ -3428,10 +3472,10 @@ def re_LAISS(
             use_pca=use_pca,
             n_components=num_pca_components,
             num_trees=1000,
-            index_folder_relative_path=index_folder_relative_path,
+            path_to_index_directory=path_to_index_directory,
             save=True,
             force_recreation_of_index=force_recreation_of_annoy_index,
-            upweight_lc_feats_factor=upweight_lc_feats_factor,
+            weight_lc_feats_factor=weight_lc_feats_factor,
         )
 
         # run primer
@@ -3459,7 +3503,8 @@ def re_LAISS(
             suggest_neighbor_num=suggest_neighbor_num,
             max_neighbor_dist=max_neighbor_distance,
             search_k=search_k,
-            upweight_lc_feats_factor=upweight_lc_feats_factor,
+            weight_lc_feats_factor=weight_lc_feats_factor,
+            save_figures=save_figures,
             path_to_figure_directory=path_to_figure_directory,
         )
 
@@ -3477,6 +3522,7 @@ def re_LAISS(
                 path_to_dataset_bank=path_to_dataset_bank,
                 path_to_models_directory=path_to_models_directory,
                 path_to_figure_directory=path_to_figure_directory,
+                save_figures=save_figures,
                 n_estimators=n_estimators,
                 contamination=contamination,
                 max_samples=max_samples,
@@ -3487,9 +3533,6 @@ def re_LAISS(
         return nearest_neighbors_df, primer_dict
 
     return
-
-
-import math
 
 
 def create_re_laiss_features_dict(
@@ -3518,16 +3561,26 @@ def create_re_laiss_features_dict(
     return re_laiss_features_dict
 
 
+# Note: old corner plots in the figure directory will be overwritten!
 def re_corner_plot(
-    neighbors_df,
-    primer_dict,
+    neighbors_df,  # from reLAISS nearest neighbors
+    primer_dict,  # from reLAISS nearest neighbors
     path_to_dataset_bank,
-    lc_feature_names=[],  # Must be passed in just as they were passed to nearest neighbors
-    host_feature_names=[],  # # Must be passed in just as they were passed to nearest neighbors
     remove_outliers_bool=True,
     path_to_figure_directory="../figures",
     save_plots=True,
 ):
+    if primer_dict is None:
+        raise ValueError(
+            "primer_dict is None. Try running NN search with reLAISS again."
+        )
+    if neighbors_df is None:
+        raise ValueError(
+            "neighbors_df is None. Try running reLAISS NN search again using run_NN=True, suggest_neighbor_num=False to get correct object."
+        )
+
+    lc_feature_names = primer_dict["lc_feat_names"]
+    host_feature_names = primer_dict["host_feat_names"]
 
     if save_plots:
         os.makedirs(path_to_figure_directory, exist_ok=True)
@@ -3637,14 +3690,17 @@ def re_corner_plot(
                     marker="x",
                     linewidth=2,
                 )
+
         if save_plots:
             plt.savefig(
-                path_to_figure_directory + f"/corner_plots/{batch_name}",
+                path_to_figure_directory + f"/corner_plots/{batch_name}.png",
                 dpi=300,
                 bbox_inches="tight",
             )
-
         plt.show()
 
-    print("Finished creating all plots!")
+    if save_plots:
+        print("Corner plots saved to" + path_to_figure_directory + f"/corner_plots")
+    else:
+        print("Finished creating all corner plots!")
     return
